@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Party Extension",
+  "version": "1.0",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "windows"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/",
+    "https://*.peerjs.com/"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.netflix.com/*",
+        "*://*.hulu.com/*",
+        "*://*.disneyplus.com/*",
+        "*://*.primevideo.com/*"
+      ],
+      "js": [
+        "contentScript.js"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "video-chat.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://localhost:3000 ws://localhost:3000 https://*.peerjs.com wss://*.peerjs.com"
+  }
+}

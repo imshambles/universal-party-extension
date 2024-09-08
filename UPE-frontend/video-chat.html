@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Chat</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="video-chat-box">
+    <div id="local-video-container">
+      <video id="local-video" autoplay muted></video>
+      <div class="video-placeholder">Loading local video...</div>
+    </div>
+    <div id="remote-video-container">
+      <video id="remote-video" autoplay></video>
+      <div class="video-placeholder">Waiting for remote user...</div>
+    </div>
+    <div id="chat-controls">
+      <button id="mute-audio-button" aria-label="Mute audio">Mute Audio</button>
+      <button id="mute-video-button" aria-label="Mute video">Mute Video</button>
+      <button id="end-call-button" aria-label="End call">End Call</button>
+    </div>
+  </div>
+
+  <script src="libs/socket.io.min.js"></script>
+  <script src="libs/peerjs.min.js"></script>
+  <script type="module" src="video-chat.js"></script>
+</body>
+</html>
