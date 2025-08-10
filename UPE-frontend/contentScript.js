@@ -12,15 +12,81 @@ let currentVideo = null;
 let overlayActive = false; // whether sidebar overlay is shown
 let cleanupVideoHandlers = null; // to detach listeners from previous video
 let pendingStartTime = null; // seconds from invite link to seek on first playback
+let upePeerOpenId = null; // last opened PeerJS ID (when available)
 
 let partyActive = false; // only join & show overlay when true
+let joinPromptVisible = false; // whether the 'Join now' prompt is shown
+
+// Pending invite state (do not switch rooms until user confirms)
+let pendingInviteRoom = null;
+let pendingInviteStart = null;
+
+
+// Deduping state for room joins
+let lastControlJoinSig = null;
+
+// Socket connect guard and pending sync queue
+let isConnecting = false;
+const pendingSync = { play: false, pause: false, seekTime: null };
+
+function flushPendingSync() {
+    try {
+        if (!socket || !socket.connected) return;
+        // Apply seek first if any
+        if (typeof pendingSync.seekTime === 'number') {
+            socket.emit('seek-video', pendingSync.seekTime, { displayName: displayName || 'You' });
+        }
+        // Last control state wins: prefer play over pause
+        if (pendingSync.play) {
+            socket.emit('play-video', { displayName: displayName || 'You' });
+        } else if (pendingSync.pause) {
+            socket.emit('pause-video', { displayName: displayName || 'You' });
+        }
+    } finally {
+        pendingSync.play = false;
+        pendingSync.pause = false;
+        pendingSync.seekTime = null;
+    }
+}
+
+function ensureConnected() {
+    if (!socket) { ensureSocket(); }
+    if (!socket) return;
+    if (socket.connected) return;
+    if (isConnecting) return;
+    isConnecting = true;
+    const clear = () => { isConnecting = false; };
+    socket.once && socket.once('connect', () => { clear(); flushPendingSync(); });
+    socket.once && socket.once('connect_error', clear);
+    try { socket.connect(); } catch (e) { console.warn('socket.connect error', e); clear(); }
+}
+
+function queueSyncAndConnect(kind, time) {
+    if (kind === 'seek' && typeof time === 'number') {
+        pendingSync.seekTime = time;
+    } else if (kind === 'play') {
+        pendingSync.play = true; pendingSync.pause = false; // last wins
+    } else if (kind === 'pause') {
+        pendingSync.pause = true; pendingSync.play = false;
+    }
+    ensureConnected();
+}
+
+let lastPeerJoinSig = null;
+let hasAnnouncedJoin = false;
 
 
 function ensureSocket() {
     if (socket && socket.connected) return;
     if (!socket) {
         // Use deployed signaling server
-        socket = io('https://universal-party-extension.onrender.com');
+        socket = io('https://universal-party-extension.onrender.com', {
+            transports: ['websocket', 'polling'],
+            timeout: 20000,
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000
+        });
 
         socket.on('connect', () => {
             console.log('Connected to Socket.IO server');
@@ -29,10 +95,28 @@ function ensureSocket() {
                 console.log('Auto-joining room on connect:', roomId, peerId);
                 joinRoom();
             }
+            // Flush any pending sync now that we’re connected
+            try { flushPendingSync(); } catch {}
+            // Also ensure real peer registration if PeerJS already opened
+            try { ensurePeerRegisteredWithServer(); } catch {}
         });
 
         socket.on('connect_error', (error) => {
             console.error('Socket.IO connection error:', error);
+        });
+
+        socket.on('disconnect', (reason) => {
+            console.log('Socket disconnected:', reason);
+        });
+
+        socket.on('reconnect', (attemptNumber) => {
+            console.log('Socket reconnected after', attemptNumber, 'attempts');
+            if (roomId && peerId) {
+                console.log('Re-joining room after reconnect:', roomId, peerId);
+                joinRoom();
+            }
+            // Re-register as real peer if PeerJS is ready
+            try { ensurePeerRegisteredWithServer(); } catch {}
         });
 
         // Receive sync events with suppression to avoid loops
@@ -47,8 +131,8 @@ function ensureSocket() {
             }
             // Show system message
             if (data && data.displayName) {
-                upeAppendMessage({ 
-                    from: 'system', 
+                upeAppendMessage({
+                    from: 'system',
                     text: `${data.displayName} played the video`,
                     type: 'system'
                 });
@@ -64,8 +148,8 @@ function ensureSocket() {
             }
             // Show system message
             if (data && data.displayName) {
-                upeAppendMessage({ 
-                    from: 'system', 
+                upeAppendMessage({
+                    from: 'system',
                     text: `${data.displayName} paused the video`,
                     type: 'system'
                 });
@@ -84,19 +168,19 @@ function ensureSocket() {
                 const minutes = Math.floor(time / 60);
                 const seconds = Math.floor(time % 60);
                 const timeString = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-                upeAppendMessage({ 
-                    from: 'system', 
+                upeAppendMessage({
+                    from: 'system',
                     text: `${data.displayName} skipped to ${timeString}`,
                     type: 'system'
                 });
             }
         });
-        
+
         // Handle system messages
         socket.on('system-message', (data) => {
             console.log('[SYNC] Received system message:', data);
-            upeAppendMessage({ 
-                from: 'system', 
+            upeAppendMessage({
+                from: 'system',
                 text: data.text,
                 type: 'system'
             });
@@ -114,29 +198,71 @@ function initializeSocket() {
     // Sync event listeners are attached in ensureSocket() with suppression logic.
 }
 
-// Function to join or create a room
+// Ensure the server has us registered as a real peer if PeerJS is ready
+function ensurePeerRegisteredWithServer() {
+    try {
+        if (!socket) return;
+        if (!roomId) return;
+        const id = upePeerOpenId || (upePeer && upePeer.id);
+        if (!id) return;
+
+        const peerSig = `${roomId}|${id}|${socket && socket.id}|PEER`;
+        if (lastPeerJoinSig === peerSig) {
+            // Already registered this peer signature
+            return;
+        }
+
+        if (!socket.connected) {
+            console.log('[UPE] Socket not connected; will emit join-room as peer on connect');
+            socket.once('connect', () => {
+                const postConnSig = `${roomId}|${id}|${socket && socket.id}|PEER`;
+                if (lastPeerJoinSig !== postConnSig) {
+                    console.log('[UPE] Emitting join-room as PEER (post-connect)', { roomId, id });
+                    socket.emit('join-room', String(roomId), id);
+                    lastPeerJoinSig = postConnSig;
+                }
+            });
+            try { socket.connect(); } catch {}
+            return;
+        }
+        console.log('[UPE] Emitting join-room as PEER (ensure)', { roomId, id });
+        socket.emit('join-room', String(roomId), id);
+        lastPeerJoinSig = peerSig;
+    } catch (e) {
+        console.warn('ensurePeerRegisteredWithServer failed', e);
+    }
+}
+
+
+// Function to join or create a room (deduped)
 function joinRoom() {
     if (roomId && peerId && socket && socket.connected) {
-        // Distinguish control sockets so chat clients can ignore these IDs
-        const controlId = String(peerId).startsWith('control-') ? String(peerId) : `control-${String(peerId)}`;
-        console.log(`Joining room ${roomId} with CONTROL ID ${controlId}`);
-        socket.emit('join-room', roomId, controlId);
+        const controlSig = `${roomId}|${peerId}|${socket && socket.id}|CONTROL`;
+        if (lastControlJoinSig === controlSig) {
+            return;
+        }
+        console.log(`Joining room ${roomId} with PEER ID ${peerId}`);
+        socket.emit('join-room', roomId, peerId);
+        lastControlJoinSig = controlSig;
         setupVideoListeners();
-        
-        // Show system message when joining room
-        setTimeout(() => {
-            upeAppendMessage({ 
-                from: 'system', 
-                text: 'Joined the party! Video sync is now active.',
-                type: 'system'
-            });
-        }, 500);
+
+        // Show system message when joining room (only once per session)
+        if (!hasAnnouncedJoin) {
+            hasAnnouncedJoin = true;
+            setTimeout(() => {
+                upeAppendMessage({
+                    from: 'system',
+                    text: 'Joined the party! Video sync is now active.',
+                    type: 'system'
+                });
+            }, 500);
+        }
     } else {
-        console.log('Cannot join room yet:', { 
-            roomId: !!roomId, 
-            peerId: !!peerId, 
-            socket: !!socket, 
-            connected: socket ? socket.connected : false 
+        console.log('Cannot join room yet:', {
+            roomId: !!roomId,
+            peerId: !!peerId,
+            socket: !!socket,
+            connected: socket ? socket.connected : false
         });
     }
 }
@@ -162,7 +288,7 @@ function setupVideoListeners() {
         setTimeout(setupVideoListeners, 1500);
         return;
     }
-    
+
     console.log('Setting up video listeners for:', video);
     console.log('Video state:', {
         currentTime: video.currentTime,
@@ -208,15 +334,8 @@ function setupVideoListeners() {
         if (socket && socket.connected) {
             socket.emit('play-video', { displayName: displayName || 'You' });
         } else {
-            console.warn('[SYNC] Socket not connected, cannot emit play-video');
-            // Try to reconnect and emit
-            if (socket) {
-                socket.once('connect', () => {
-                    console.log('[SYNC] Reconnected, emitting play-video');
-                    socket.emit('play-video', { displayName: displayName || 'You' });
-                });
-                socket.connect();
-            }
+            // queue and connect instead of failing
+            queueSyncAndConnect('play');
         }
     };
     const onPause = () => {
@@ -225,15 +344,8 @@ function setupVideoListeners() {
         if (socket && socket.connected) {
             socket.emit('pause-video', { displayName: displayName || 'You' });
         } else {
-            console.warn('[SYNC] Socket not connected, cannot emit pause-video');
-            // Try to reconnect and emit
-            if (socket) {
-                socket.once('connect', () => {
-                    console.log('[SYNC] Reconnected, emitting pause-video');
-                    socket.emit('pause-video', { displayName: displayName || 'You' });
-                });
-                socket.connect();
-            }
+            // queue and connect instead of failing
+            queueSyncAndConnect('pause');
         }
     };
     const onSeeked = () => {
@@ -242,22 +354,15 @@ function setupVideoListeners() {
         if (socket && socket.connected) {
             socket.emit('seek-video', video.currentTime, { displayName: displayName || 'You' });
         } else {
-            console.warn('[SYNC] Socket not connected, cannot emit seek-video');
-            // Try to reconnect and emit
-            if (socket) {
-                socket.once('connect', () => {
-                    console.log('[SYNC] Reconnected, emitting seek-video');
-                    socket.emit('seek-video', video.currentTime, { displayName: displayName || 'You' });
-                });
-                socket.connect();
-            }
+            // queue and connect instead of failing
+            queueSyncAndConnect('seek', video.currentTime);
         }
     };
 
     video.addEventListener('loadedmetadata', maybeApplyPendingStart, { once: true });
     video.addEventListener('canplay', maybeApplyPendingStart, { once: true });
     if (video.readyState >= 1) maybeApplyPendingStart();
-    
+
     // Also try to apply pending start time periodically for invite links
     if (typeof pendingStartTime === 'number' && isFinite(pendingStartTime)) {
         const checkInterval = setInterval(() => {
@@ -305,20 +410,127 @@ function ensureRoomAndOverlay() {
     console.log('Ensuring room and overlay:', { roomId, peerId });
     ensureSocket();
     if (socket && !socket.connected) {
-        console.log('Socket not connected, attempting to connect...');
-        try { socket.connect(); } catch (e) { console.error('Socket connect error:', e); }
-        if (socket && socket.once) {
-            socket.once('connect', () => {
-                console.log('Socket connected, joining room...');
-                joinRoom();
-                ensureOverlayReady();
-            });
-            return;
-        }
+        console.log('Socket not connected; will join on connect (handled by ensureSocket)');
+        ensureOverlayReady();
+        return;
     }
     joinRoom();
     ensureOverlayReady();
 }
+
+// Show a lightweight 'Join now' prompt for invite flows
+function showJoinNowPrompt(room, startTime) {
+    if (joinPromptVisible) return;
+    joinPromptVisible = true;
+
+    // Remove any existing prompt just in case
+    const existing = document.getElementById('upe-join-prompt');
+    if (existing) existing.remove();
+
+    const pad = '10px';
+    const box = document.createElement('div');
+    box.id = 'upe-join-prompt';
+    box.style.position = 'fixed';
+    box.style.bottom = '20px';
+    box.style.right = '20px';
+    box.style.zIndex = '2147483647';
+    box.style.background = 'rgba(0,0,0,0.85)';
+    box.style.color = '#fff';
+    box.style.padding = pad;
+    box.style.borderRadius = '8px';
+    box.style.boxShadow = '0 6px 18px rgba(0,0,0,0.35)';
+    box.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+    box.style.fontSize = '14px';
+    box.style.maxWidth = '320px';
+
+    const title = document.createElement('div');
+    title.textContent = 'Join party?';
+    title.style.fontWeight = '600';
+    title.style.marginBottom = '6px';
+    box.appendChild(title);
+
+    const info = document.createElement('div');
+    const timeLabel = (typeof startTime === 'number' && isFinite(startTime))
+        ? ` · start at ${Math.floor(startTime/60)}:${String(Math.floor(startTime%60)).padStart(2,'0')}`
+        : '';
+    info.textContent = `Room ${room}${timeLabel}`;
+    info.style.opacity = '0.9';
+    info.style.marginBottom = '10px';
+    box.appendChild(info);
+
+    const btnRow = document.createElement('div');
+    btnRow.style.display = 'flex';
+    btnRow.style.gap = '8px';
+
+    const joinBtn = document.createElement('button');
+    joinBtn.className = 'upe-join-now';
+    joinBtn.textContent = 'Join now';
+    joinBtn.style.background = '#4F46E5';
+    joinBtn.style.color = '#fff';
+    joinBtn.style.border = 'none';
+    joinBtn.style.padding = '8px 12px';
+    joinBtn.style.borderRadius = '6px';
+    joinBtn.style.cursor = 'pointer';
+
+    const laterBtn = document.createElement('button');
+    laterBtn.textContent = 'Later';
+    laterBtn.style.background = 'transparent';
+    laterBtn.style.color = '#fff';
+    laterBtn.style.border = '1px solid rgba(255,255,255,0.3)';
+    laterBtn.style.padding = '8px 12px';
+    laterBtn.style.borderRadius = '6px';
+    laterBtn.style.cursor = 'pointer';
+
+    btnRow.appendChild(joinBtn);
+    btnRow.appendChild(laterBtn);
+    box.appendChild(btnRow);
+
+    document.body.appendChild(box);
+
+    const hideJoinPrompt = () => {
+        const el = document.getElementById('upe-join-prompt');
+        if (el) el.remove();
+        joinPromptVisible = false;
+    };
+
+    joinBtn.addEventListener('click', () => {
+        try {
+            // Commit pending invite to storage only now
+            if (pendingInviteRoom) {
+                roomId = pendingInviteRoom;
+                peerId = peerId || Math.random().toString(36).substring(2, 15);
+                partyActive = true;
+                const payload = { roomId, peerId, partyActive };
+                if (typeof pendingInviteStart === 'number' && isFinite(pendingInviteStart)) {
+                    pendingStartTime = pendingInviteStart;
+                    payload.pendingStartTime = pendingInviteStart;
+                }
+                chrome.storage.local.set(payload, () => {
+                    initializeSocket();
+                    ensureSocket();
+                    joinRoom();
+                    ensureOverlayReady();
+                    attemptAutoStartFromInvite();
+                });
+            } else {
+                ensureSocket();
+                joinRoom();
+                ensureOverlayReady();
+                attemptAutoStartFromInvite();
+            }
+            setTimeout(() => {
+                upeAppendMessage({ from: 'system', text: 'Joined party via invite link!', type: 'system' });
+            }, 500);
+        } catch (e) {
+            console.warn('Join now failed', e);
+        } finally {
+            hideJoinPrompt();
+        }
+    });
+
+    laterBtn.addEventListener('click', hideJoinPrompt);
+}
+
 
 
 // Function to open video chat window
@@ -336,13 +548,41 @@ function openVideoChatWindow() {
     });
 }
 
-// Detect invite link param and auto-join
+// Detect invite link param and present a 'Join now' prompt (without switching room until accepted)
 (function handleInviteLink() {
+    setTimeout(() => {
+        try {
+            const url = new URL(window.location.href);
+            const fromSearch = url.searchParams.get('upeRoom');
+            let fromHash = null;
+            let startTime = null;
+            if (url.hash) {
+                const hp = new URLSearchParams(url.hash.replace(/^#/, ''));
+                fromHash = hp.get('upeRoom');
+                const st = hp.get('startTime');
+                if (st != null) startTime = parseFloat(st);
+            }
+            const inviteRoom = fromSearch || fromHash;
+            if (inviteRoom) {
+                pendingInviteRoom = String(inviteRoom);
+                pendingInviteStart = (typeof startTime === 'number' && isFinite(startTime)) ? startTime : null;
+                // Prepare socket so we can join quickly on click, but do not set storage yet
+                initializeSocket();
+                ensureSocket();
+                showJoinNowPrompt(pendingInviteRoom, pendingInviteStart);
+            }
+        } catch (e) {
+            console.warn('Failed to parse invite link', e);
+        }
+    }, 100);
+})();
+
+// Re-check invite prompt on SPA route changes (do not switch until accepted)
+function tryShowJoinPromptFromURL() {
     try {
         const url = new URL(window.location.href);
         const fromSearch = url.searchParams.get('upeRoom');
-        let fromHash = null;
-        let startTime = null;
+        let fromHash = null; let startTime = null;
         if (url.hash) {
             const hp = new URLSearchParams(url.hash.replace(/^#/, ''));
             fromHash = hp.get('upeRoom');
@@ -350,39 +590,32 @@ function openVideoChatWindow() {
             if (st != null) startTime = parseFloat(st);
         }
         const inviteRoom = fromSearch || fromHash;
-        if (inviteRoom) {
-            roomId = String(inviteRoom);
-            peerId = Math.random().toString(36).substring(2, 15);
-            partyActive = true; // invited sessions should activate immediately
-            const payload = { roomId, peerId, partyActive };
-            if (typeof startTime === 'number' && isFinite(startTime)) {
-                pendingStartTime = startTime;
-                payload.pendingStartTime = startTime;
-            }
-            chrome.storage.local.set(payload, () => {
-                console.log('[INVITE] Room joined via invite link:', { roomId, peerId, startTime });
-                // Join room and show overlay right away
-                initializeSocket();
-                ensureSocket();
-                joinRoom();
-                ensureOverlayReady();
-                // Try to move from title page to player and start playback
-                attemptAutoStartFromInvite();
-                
-                // Show system message for invite join
-                setTimeout(() => {
-                    upeAppendMessage({ 
-                        from: 'system', 
-                        text: 'Joined party via invite link!',
-                        type: 'system'
-                    });
-                }, 1000);
-            });
-        }
-    } catch (e) {
-        console.warn('Failed to parse invite link', e);
-    }
+        if (!inviteRoom) return;
+        if (joinPromptVisible) return;
+        if (roomId && String(roomId) === String(inviteRoom)) return;
+        pendingInviteRoom = String(inviteRoom);
+        pendingInviteStart = (typeof startTime === 'number' && isFinite(startTime)) ? startTime : null;
+        initializeSocket();
+        ensureSocket();
+        showJoinNowPrompt(pendingInviteRoom, pendingInviteStart);
+    } catch (e) { console.warn('tryShowJoinPromptFromURL failed', e); }
+}
+window.addEventListener('hashchange', tryShowJoinPromptFromURL);
+window.addEventListener('popstate', tryShowJoinPromptFromURL);
+
+
+// Install hooks to detect SPA URL changes (pushState/replaceState)
+(function installURLChangeHooks(){
+    try {
+        const origPush = history.pushState;
+        const origReplace = history.replaceState;
+        history.pushState = function(){ const r = origPush.apply(this, arguments); try { tryShowJoinPromptFromURL(); } catch {} return r; };
+        history.replaceState = function(){ const r = origReplace.apply(this, arguments); try { tryShowJoinPromptFromURL(); } catch {} return r; };
+        // Also attempt once on next tick
+        setTimeout(tryShowJoinPromptFromURL, 0);
+    } catch(e) { console.warn('installURLChangeHooks failed', e); }
 })();
+
 // Attempt to move from title/details page to player and auto-start
 function attemptAutoStartFromInvite() {
     // Generic helper: click any element whose text contains keywords
@@ -462,6 +695,27 @@ function attemptAutoStartFromInvite() {
 
 // Main initialization
 chrome.storage.local.get(['roomId', 'peerId', 'pendingStartTime', 'partyActive', 'displayName'], (result) => {
+    console.log('[STORAGE] Loading room data:', result);
+
+    // Check if we have an invite link in the URL
+    const url = new URL(window.location.href);
+    const fromSearch = url.searchParams.get('upeRoom');
+    let fromHash = null;
+    if (url.hash) {
+        const hp = new URLSearchParams(url.hash.replace(/^#/, ''));
+        fromHash = hp.get('upeRoom');
+    }
+    const inviteRoom = fromSearch || fromHash;
+
+    if (inviteRoom) {
+        console.log('[STORAGE] Found invite room in URL:', inviteRoom);
+        // Don't load from storage if we have an invite link - let the invite handler set the room
+        if (result.displayName) {
+            displayName = result.displayName;
+        }
+        return;
+    }
+
     if (result.roomId && result.peerId) {
         roomId = result.roomId;
         peerId = result.peerId;
@@ -472,11 +726,11 @@ chrome.storage.local.get(['roomId', 'peerId', 'pendingStartTime', 'partyActive',
         }
         // Initialize socket (overlay shows on playback or when room set via popup)
         initializeSocket();
-        console.log('Room initialized:', { roomId, peerId, partyActive, displayName });
+        console.log('[STORAGE] Room initialized:', { roomId, peerId, partyActive, displayName });
     } else {
-        console.log('No room set yet; open the extension popup to create/join a room.');
+        console.log('[STORAGE] No room set yet; open the extension popup to create/join a room.');
     }
-    
+
     // Load display name even if no room is set
     if (result.displayName) {
         displayName = result.displayName;
@@ -486,11 +740,36 @@ chrome.storage.local.get(['roomId', 'peerId', 'pendingStartTime', 'partyActive',
 // React to room/peer changes set by the popup
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.roomId) roomId = changes.roomId.newValue;
-    if (changes.peerId) peerId = changes.peerId.newValue;
+
+    console.log('[STORAGE] Changes detected:', changes);
+
+    // Check if we're processing an invite link (don't overwrite if we already have room data from invite)
+    const url = new URL(window.location.href);
+    const fromSearch = url.searchParams.get('upeRoom');
+    let fromHash = null;
+    if (url.hash) {
+        const hp = new URLSearchParams(url.hash.replace(/^#/, ''));
+        fromHash = hp.get('upeRoom');
+    }
+    const inviteRoom = fromSearch || fromHash;
+
+    if (changes.roomId) {
+        // Don't overwrite room ID if we're processing an invite link and already have a room
+        if (inviteRoom && roomId && roomId !== inviteRoom) {
+            console.log('[STORAGE] Ignoring room ID change from popup - processing invite link');
+            return;
+        }
+        console.log('[STORAGE] Room ID changed from', roomId, 'to', changes.roomId.newValue);
+        roomId = changes.roomId.newValue;
+    }
+    if (changes.peerId) {
+        console.log('[STORAGE] Peer ID changed from', peerId, 'to', changes.peerId.newValue);
+        peerId = changes.peerId.newValue;
+    }
     if (changes.partyActive) partyActive = !!changes.partyActive.newValue;
     if (changes.pendingStartTime) pendingStartTime = changes.pendingStartTime.newValue;
     if (changes.displayName) displayName = changes.displayName.newValue || '';
+
     // Do not join until user starts party or invite has a timestamp; on play we activate
     initializeSocket();
     ensureSocket();
@@ -580,11 +859,11 @@ function ensureSidebar() {
     document.getElementById('upe-close').addEventListener('click', () => {
         sidebar.remove();
     });
-    
+
     // Add mute controls
     document.getElementById('upe-mute-audio').addEventListener('click', toggleAudioMute);
     document.getElementById('upe-mute-video').addEventListener('click', toggleVideoMute);
-    
+
     // Add name setting functionality
     document.getElementById('upe-set-name').addEventListener('click', setDisplayName);
     document.getElementById('upe-display-name').addEventListener('keypress', (e) => {
@@ -597,7 +876,7 @@ function ensureSidebar() {
         const label = document.getElementById('upe-room-label');
         if (label) label.textContent = roomId;
     }
-    
+
     // Populate display name input if it exists
     if (displayName) {
         const nameInput = document.getElementById('upe-display-name');
@@ -631,13 +910,13 @@ async function copyInviteLink() {
 function setDisplayName() {
     const nameInput = document.getElementById('upe-display-name');
     if (!nameInput) return;
-    
+
     const newName = nameInput.value.trim();
     if (newName.length === 0) {
         upeAppendMessage({ from: 'system', text: 'Please enter a valid name' });
         return;
     }
-    
+
     displayName = newName;
     chrome.storage.local.set({ displayName: displayName }, () => {
         upeAppendMessage({ from: 'system', text: `Name set to: ${displayName}` });
@@ -651,12 +930,12 @@ function getDisplayName(userId, msgDisplayName) {
     if (msgDisplayName) {
         return msgDisplayName;
     }
-    
+
     // For our own messages
     if (userId === peerId || userId === 'me') {
         return displayName || 'You';
     }
-    
+
     // For other users (fallback to peer ID)
     return userId || 'Unknown';
 }
@@ -667,7 +946,10 @@ function upeAppendMessage(msg) {
         const box = document.getElementById('upe-messages');
         if (!box) return;
         const div = document.createElement('div');
-        
+
+        // Determine if we should auto-scroll (only if already near bottom)
+        const nearBottom = (box.scrollTop + box.clientHeight) >= (box.scrollHeight - 40);
+
         // Handle system messages differently
         if (msg.type === 'system') {
             div.className = 'msg system-msg';
@@ -684,9 +966,11 @@ function upeAppendMessage(msg) {
             div.appendChild(from);
             div.appendChild(text);
         }
-        
+
         box.appendChild(div);
-        box.scrollTop = box.scrollHeight;
+        if (nearBottom) {
+            box.scrollTop = box.scrollHeight;
+        }
     } catch (e) { console.warn('appendMessage failed', e); }
 }
 
@@ -701,7 +985,7 @@ function setupChat() {
         sendBtn.onclick = () => {
             const text = input.value.trim();
             if (!text) return;
-            const payload = { 
+            const payload = {
                 text,
                 displayName: displayName || 'You'
             };
@@ -731,11 +1015,12 @@ function ensurePeer() {
     if (upePeer) return upePeer;
     upePeer = new Peer(undefined, { host: '0.peerjs.com', port: 443, secure: true });
     upePeer.on('open', (id) => {
-        console.log('[UPE] Peer open', id, 'joining room for chat overlay');
-        // Join the same room with peer id so backend recognizes as peer participant
-        if (socket && roomId) socket.emit('join-room', String(roomId), id);
-        // Ask backend who is already present
+        console.log('[UPE] Peer open', id, 'ready to join room for chat overlay');
+        // Attach listeners BEFORE join to avoid missing early events
         if (socket) {
+            socket.off && socket.off('existing-peers');
+            socket.off && socket.off('peer-connected');
+            socket.off && socket.off('peer-disconnected');
             socket.on('existing-peers', (users) => {
                 users.forEach((uid) => { if (uid && uid !== id) upeConnectTo(uid); });
             });
@@ -746,13 +1031,37 @@ function ensurePeer() {
                 if (upePeers[uid]) { try { upePeers[uid].close(); } catch {} delete upePeers[uid]; }
             });
         }
+        // Join the same room with peer id so backend recognizes as peer participant
+        const doPeerJoin = () => {
+            if (socket && roomId) {
+                console.log('[UPE] Emitting join-room as PEER', { roomId, id });
+                socket.emit('join-room', String(roomId), id);
+                upePeerOpenId = id;
+                // Also double-ensure registration in case connect races
+                try { ensurePeerRegisteredWithServer(); } catch {}
+
+            } else {
+                console.warn('[UPE] Cannot join as peer yet - missing socket or roomId');
+            }
+        };
+        if (socket) {
+            if (socket.connected) doPeerJoin();
+            else socket.once('connect', doPeerJoin);
+        } else {
+            // Ensure socket then join
+            ensureSocket();
+            if (socket) {
+                if (socket.connected) doPeerJoin();
+                else socket.once('connect', doPeerJoin);
+            }
+        }
     });
 
     upePeer.on('call', (call) => {
-        if (!upeLocalStream) { 
+        if (!upeLocalStream) {
             console.warn('[UPE] local stream not ready, queuing call from', call.peer);
             pendingCalls.push(call);
-            
+
             // Set a timeout to prevent infinite queuing
             setTimeout(() => {
                 const index = pendingCalls.indexOf(call);
@@ -761,8 +1070,8 @@ function ensurePeer() {
                     pendingCalls.splice(index, 1);
                 }
             }, 30000); // 30 second timeout
-            
-            return; 
+
+            return;
         }
         answerCall(call);
     });
@@ -775,7 +1084,7 @@ function answerCall(call) {
         console.warn('[UPE] Cannot answer call - no local stream');
         return;
     }
-    
+
     console.log('[UPE] Answering call from', call.peer);
     call.answer(upeLocalStream);
     call.on('stream', (s) => upeAttachRemote(s, call.peer));
@@ -794,17 +1103,17 @@ function ensureLocalStream() {
         upeLocalStream = stream;
         const lv = document.getElementById('upe-local');
         if (lv) { lv.srcObject = stream; lv.addEventListener('loadedmetadata', () => lv.play()); }
-        
+
         // Update mute button states
         updateMuteButtonStates();
-        
+
         // Answer any pending calls now that stream is ready
         while (pendingCalls.length > 0) {
             const call = pendingCalls.shift();
             console.log('[UPE] Answering queued call from', call.peer);
             answerCall(call);
         }
-        
+
         return stream;
     }).catch((error) => {
         console.error('[UPE] Failed to get user media:', error);
@@ -831,17 +1140,17 @@ function checkStreamStatus() {
 // Update mute button states based on current stream state
 function updateMuteButtonStates() {
     if (!upeLocalStream) return;
-    
+
     const audioTracks = upeLocalStream.getAudioTracks();
     const videoTracks = upeLocalStream.getVideoTracks();
-    
+
     // Update audio button
     if (audioTracks.length > 0) {
         const audioBtn = document.getElementById('upe-mute-audio');
         if (audioBtn) {
             const icon = audioBtn.querySelector('.icon');
             const text = audioBtn.querySelector('.text');
-            
+
             if (audioTracks[0].enabled) {
                 icon.textContent = '🔊';
                 text.textContent = 'Mute';
@@ -855,14 +1164,14 @@ function updateMuteButtonStates() {
             }
         }
     }
-    
+
     // Update video button
     if (videoTracks.length > 0) {
         const videoBtn = document.getElementById('upe-mute-video');
         if (videoBtn) {
             const icon = videoBtn.querySelector('.icon');
             const text = videoBtn.querySelector('.text');
-            
+
             if (videoTracks[0].enabled) {
                 icon.textContent = '📹';
                 text.textContent = 'Video';
@@ -919,16 +1228,16 @@ function upeAttachRemote(stream, uid) {
 // Toggle audio mute
 function toggleAudioMute() {
     if (!upeLocalStream) return;
-    
+
     const audioTracks = upeLocalStream.getAudioTracks();
     if (audioTracks.length > 0) {
         const isMuted = audioTracks[0].enabled;
         audioTracks[0].enabled = !isMuted;
-        
+
         const btn = document.getElementById('upe-mute-audio');
         const icon = btn.querySelector('.icon');
         const text = btn.querySelector('.text');
-        
+
         if (isMuted) {
             icon.textContent = '🔇';
             text.textContent = 'Unmute';
@@ -940,7 +1249,7 @@ function toggleAudioMute() {
             btn.title = 'Mute Audio';
             btn.classList.remove('muted');
         }
-        
+
         console.log('Audio', isMuted ? 'muted' : 'unmuted');
     }
 }
@@ -948,16 +1257,16 @@ function toggleAudioMute() {
 // Toggle video mute
 function toggleVideoMute() {
     if (!upeLocalStream) return;
-    
+
     const videoTracks = upeLocalStream.getVideoTracks();
     if (videoTracks.length > 0) {
         const isMuted = videoTracks[0].enabled;
         videoTracks[0].enabled = !isMuted;
-        
+
         const btn = document.getElementById('upe-mute-video');
         const icon = btn.querySelector('.icon');
         const text = btn.querySelector('.text');
-        
+
         if (isMuted) {
             icon.textContent = '🚫';
             text.textContent = 'Show';
@@ -969,7 +1278,7 @@ function toggleVideoMute() {
             btn.title = 'Mute Video';
             btn.classList.remove('muted');
         }
-        
+
         console.log('Video', isMuted ? 'muted' : 'unmuted');
     }
 }
@@ -982,7 +1291,7 @@ function ensureOverlayReady() {
     ensureSocket();
     setupChat();
     ensurePeer();
-    
+
     // Ensure local stream is ready before proceeding
     ensureLocalStream().then(() => {
         console.log('[UPE] Overlay ready with local stream');

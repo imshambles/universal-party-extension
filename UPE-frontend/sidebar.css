@@ -82,6 +82,11 @@
   background: #222;
 }
 
+
+/* Ensure flex child can actually scroll (min-height fix) */
+#upe-sidebar .chat { min-height: 0; }
+#upe-sidebar .chat .messages { min-height: 0; scroll-behavior: smooth; }
+
 #upe-sidebar .chat {
   flex: 1;
   display: flex;

@@ -31,65 +31,58 @@ io.on('connection', (socket) => {
 
   // Join or update membership in a room
   socket.on('join-room', (roomId, peerId) => {
-    const prevPeerId = socket.data.peerId;
-    const prevIsPeer = socket.data.isPeer;
-
     console.log(`Attempting to join room: ${roomId} for peer: ${peerId}`);
 
-    socket.join(roomId); // idempotent
+    socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.peerId = peerId;
-    socket.data.isPeer = !String(peerId).startsWith('control-');
 
-    console.log(`User ${peerId} joined room ${roomId} (isPeer=${socket.data.isPeer})`);
+    console.log(`User ${peerId} joined room ${roomId}`);
 
-    // Notify others only when this socket becomes a real peer or peerId changes
-    if (socket.data.isPeer && (!prevIsPeer || prevPeerId !== peerId)) {
-      socket.to(roomId).emit('peer-connected', peerId);
-      socket.to(roomId).emit('user-connected', peerId);
-      
-      // Send system message about user joining
-      socket.to(roomId).emit('system-message', {
-        type: 'user-joined',
-        peerId: peerId,
-        text: `A user joined the party`
-      });
+    // Notify others that a new peer has connected
+    socket.to(roomId).emit('peer-connected', peerId);
+    socket.to(roomId).emit('user-connected', peerId);
+    
+    // Send system message about user joining
+    socket.to(roomId).emit('system-message', {
+      type: 'user-joined',
+      peerId: peerId,
+      text: `A user joined the party`
+    });
 
-      // Send existing peers to this newly joined peer
-      try {
-        const room = io.sockets.adapter.rooms.get(roomId);
-        const existingPeers = [];
-        if (room) {
-          for (const sid of room) {
-            if (sid === socket.id) continue;
-            const s = io.sockets.sockets.get(sid);
-            if (s && s.data && s.data.peerId && s.data.isPeer) existingPeers.push(s.data.peerId);
-          }
+    // Send existing peers to this newly joined peer
+    try {
+      const room = io.sockets.adapter.rooms.get(roomId);
+      const existingPeers = [];
+      if (room) {
+        for (const sid of room) {
+          if (sid === socket.id) continue;
+          const s = io.sockets.sockets.get(sid);
+          if (s && s.data && s.data.peerId) existingPeers.push(s.data.peerId);
         }
-        socket.emit('existing-peers', existingPeers);
-        socket.emit('existing-users', existingPeers); // backward-compat
-      } catch (e) {
-        console.error('Error computing existing users:', e);
       }
+      socket.emit('existing-peers', existingPeers);
+      socket.emit('existing-users', existingPeers); // backward-compat
+    } catch (e) {
+      console.error('Error computing existing users:', e);
     }
   });
 
   // Common handlers (attached once per socket)
   socket.on('disconnect', (reason) => {
-    const { roomId, peerId, isPeer } = socket.data || {};
+    const { roomId, peerId } = socket.data || {};
     if (!roomId || !peerId) return;
     console.log(`User ${peerId} disconnected from room ${roomId}. Reason: ${reason}`);
-    if (isPeer) {
-      socket.to(roomId).emit('peer-disconnected', peerId);
-      socket.to(roomId).emit('user-disconnected', peerId);
-      
-      // Send system message about user leaving
-      socket.to(roomId).emit('system-message', {
-        type: 'user-left',
-        peerId: peerId,
-        text: `A user left the party`
-      });
-    }
+    
+    socket.to(roomId).emit('peer-disconnected', peerId);
+    socket.to(roomId).emit('user-disconnected', peerId);
+    
+    // Send system message about user leaving
+    socket.to(roomId).emit('system-message', {
+      type: 'user-left',
+      peerId: peerId,
+      text: `A user left the party`
+    });
   });
 
   socket.on('error', (error) => {

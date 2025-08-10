@@ -21,12 +21,14 @@ startBtn.addEventListener('click', async () => {
     roomId = Math.random().toString(36).substring(2, 15);
     peerId = Math.random().toString(36).substring(2, 15);
 
+    console.log('[POPUP] Generated room/peer IDs:', { roomId, peerId });
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab || !tab.id || !tab.url) { updateRoomDisplay('Open a supported streaming page'); return; }
 
     // Mark party active and set IDs in the page context
     await chrome.storage.local.set({ roomId, peerId, partyActive: true });
-    console.log('Party started with roomId:', roomId, 'peerId:', peerId);
+    console.log('[POPUP] Party started with roomId:', roomId, 'peerId:', peerId);
 
     // Ask the page to start party now (join + overlay) and return timestamp
     const [exec] = await chrome.scripting.executeScript({
@@ -59,6 +61,9 @@ startBtn.addEventListener('click', async () => {
       hashParams.set('startTime', String(clamped.toFixed(3)));
     }
     url.hash = hashParams.toString();
+
+    console.log('[POPUP] Generated invite URL:', url.toString());
+    console.log('[POPUP] Hash params:', hashParams.toString());
 
     await navigator.clipboard.writeText(url.toString());
     updateRoomDisplay(`Party started! Link copied.`);
