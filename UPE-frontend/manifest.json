@@ -25,7 +25,11 @@
         "*://*.netflix.com/*",
         "*://*.hulu.com/*",
         "*://*.disneyplus.com/*",
-        "*://*.primevideo.com/*"
+        "*://*.primevideo.com/*",
+        "*://*.hotstar.com/*",
+        "*://*.youtube.com/*",
+        "*://localhost/*",
+        "file://*"
       ],
       "js": [
         "libs/socket.io.min.js",

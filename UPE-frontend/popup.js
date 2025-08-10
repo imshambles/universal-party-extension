@@ -1,78 +1,69 @@
 let roomId;
 let peerId;
 
-// Update the displayed room ID
-function updateRoomDisplay() {
+function updateRoomDisplay(text) {
   const el = document.getElementById('roomId');
-  el.textContent = roomId ? `Room ID: ${roomId}` : '';
+  el.textContent = text || (roomId ? `Room ID: ${roomId}` : '');
 }
 
-// Load any existing IDs when popup opens
+// On open, ensure we have IDs and provide a one-click Start Party
 chrome.storage.local.get(['roomId', 'peerId'], (res) => {
   roomId = res.roomId || '';
   peerId = res.peerId || '';
   updateRoomDisplay();
 });
 
-// Reflect changes written by content scripts or other pages
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== 'local') return;
-  if (changes.roomId) roomId = changes.roomId.newValue;
-  if (changes.peerId) peerId = changes.peerId.newValue;
-  updateRoomDisplay();
-});
-
-document.getElementById('createRoom').addEventListener('click', () => {
-  // Generate a unique room ID and peer ID
-  roomId = Math.random().toString(36).substring(2, 15);
-  peerId = Math.random().toString(36).substring(2, 15);
-  chrome.storage.local.set({ roomId, peerId });
-  updateRoomDisplay();
-  alert(`Room created! Share this Room ID with others: ${roomId}`);
-});
-
-document.getElementById('joinRoom').addEventListener('click', () => {
-  const entered = prompt('Enter the Room ID to join:');
-  if (entered) {
-    roomId = String(entered);
-    peerId = Math.random().toString(36).substring(2, 15);
-    chrome.storage.local.set({ roomId, peerId });
-    updateRoomDisplay();
-    alert(`Joined Room ID: ${roomId}`);
-  }
-});
-
-document.getElementById('copyInviteLink').addEventListener('click', async () => {
-  if (!roomId) { alert('Create or join a room first'); return; }
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs && tabs[0];
-  if (!tab || !tab.url) { alert('Open a supported streaming page first'); return; }
+// Start Party: create room, activate party on page, then copy link
+const startBtn = document.getElementById('startParty');
+startBtn.addEventListener('click', async () => {
   try {
+    // Create room/peer IDs
+    roomId = Math.random().toString(36).substring(2, 15);
+    peerId = Math.random().toString(36).substring(2, 15);
+
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id || !tab.url) { updateRoomDisplay('Open a supported streaming page'); return; }
+
+    // Mark party active and set IDs in the page context
+    await chrome.storage.local.set({ roomId, peerId, partyActive: true });
+    console.log('Party started with roomId:', roomId, 'peerId:', peerId);
+
+    // Ask the page to start party now (join + overlay) and return timestamp
+    const [exec] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        // Read currentTime and set pending start in storage for content script
+        const vids = Array.from(document.querySelectorAll('video'));
+        let time = null, duration = null;
+        if (vids.length) {
+          const scored = vids
+            .filter(v => !!(v.offsetWidth * v.offsetHeight))
+            .map(v => ({ v, area: v.offsetWidth * v.offsetHeight, ready: v.readyState }));
+          scored.sort((a, b) => (b.ready - a.ready) || (b.area - a.area));
+          const v = (scored[0] && scored[0].v) || vids[0];
+          time = (v && isFinite(v.currentTime)) ? v.currentTime : null;
+          duration = (v && isFinite(v.duration)) ? v.duration : null;
+        }
+        return { time, duration };
+      },
+    });
+    const time = exec?.result?.time;
+    const duration = exec?.result?.duration;
+
+    // Build invite URL with room and timestamp
     const url = new URL(tab.url);
-    // Use hash param to avoid interfering with site query params
     const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
     hashParams.set('upeRoom', roomId);
+    if (typeof time === 'number' && time > 0.25) {
+      const clamped = (typeof duration === 'number' && isFinite(duration)) ? Math.min(time, Math.max(0, duration - 0.25)) : time;
+      hashParams.set('startTime', String(clamped.toFixed(3)));
+    }
     url.hash = hashParams.toString();
+
     await navigator.clipboard.writeText(url.toString());
-    alert('Invite link copied to clipboard!');
+    updateRoomDisplay(`Party started! Link copied.`);
   } catch (e) {
-    console.error('Failed to copy invite link', e);
-    alert('Failed to copy invite link');
+    console.error('Start Party failed', e);
+    updateRoomDisplay('Failed to start party');
   }
-});
-
-document.getElementById('startVideoChat').addEventListener('click', async () => {
-  // Ensure we have IDs
-  if (!roomId || !peerId) {
-    const res = await new Promise((resolve) => chrome.storage.local.get(['roomId', 'peerId'], resolve));
-    roomId = res.roomId || roomId;
-    peerId = res.peerId || peerId;
-  }
-  if (!roomId || !peerId) {
-    alert('Please create or join a room first.');
-    return;
-  }
-
-  // Ask background to open the window (more reliable in MV3)
-  chrome.runtime.sendMessage({ type: 'video-chat', roomId, peerId });
 });

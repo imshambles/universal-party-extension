@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Sync Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+        video { width: 100%; max-width: 600px; margin: 20px 0; border: 2px solid #ccc; }
+        .controls { margin: 20px 0; }
+        button { margin: 5px; padding: 10px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .status { background: #f8f9fa; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #007bff; }
+        .debug { background: #f1f3f4; padding: 10px; margin: 10px 0; border-radius: 5px; font-family: monospace; font-size: 12px; }
+        .sync-status { background: #d4edda; padding: 10px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #28a745; }
+        .error { background: #f8d7da; border-left: 4px solid #dc3545; }
+    </style>
+</head>
+<body>
+    <h1>🎬 Video Sync Test Page</h1>
+    
+    <div class="status" id="status">Loading extension...</div>
+    <div class="sync-status" id="sync-status">Waiting for sync connection...</div>
+    
+    <video id="test-video" controls>
+        <source src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" type="video/mp4">
+        Your browser does not support the video tag.
+    </video>
+    
+    <div class="controls">
+        <button onclick="document.getElementById('test-video').play()">▶️ Play</button>
+        <button onclick="document.getElementById('test-video').pause()">⏸️ Pause</button>
+        <button onclick="document.getElementById('test-video').currentTime = 30">⏭️ Seek to 30s</button>
+        <button onclick="document.getElementById('test-video').currentTime = 60">⏭️ Seek to 60s</button>
+        <button onclick="testInviteLink()">🔗 Test Invite Link</button>
+        <button onclick="clearRoom()">🗑️ Clear Room</button>
+    </div>
+    
+    <div class="debug" id="debug-info">
+        <strong>Debug Info:</strong><br>
+        <span id="video-info">Loading...</span>
+    </div>
+
+    <div class="debug" id="extension-info">
+        <strong>Extension Info:</strong><br>
+        <span id="extension-status">Loading...</span>
+    </div>
+
+    <script>
+        // Mock extension environment
+        window.chrome = {
+            storage: {
+                local: {
+                    get: (keys, callback) => {
+                        const result = {
+                            roomId: localStorage.getItem('upe-roomId') || '',
+                            peerId: localStorage.getItem('upe-peerId') || '',
+                            partyActive: localStorage.getItem('upe-partyActive') === 'true',
+                            pendingStartTime: localStorage.getItem('upe-pendingStartTime') ? parseFloat(localStorage.getItem('upe-pendingStartTime')) : null
+                        };
+                        console.log('Storage get:', keys, result);
+                        callback(result);
+                    },
+                    set: (data, callback) => {
+                        console.log('Storage set:', data);
+                        if (data.roomId) localStorage.setItem('upe-roomId', data.roomId);
+                        if (data.peerId) localStorage.setItem('upe-peerId', data.peerId);
+                        if (data.partyActive !== undefined) localStorage.setItem('upe-partyActive', data.partyActive);
+                        if (data.pendingStartTime !== undefined) localStorage.setItem('upe-pendingStartTime', data.pendingStartTime);
+                        if (callback) callback();
+                    },
+                    onChanged: {
+                        addListener: (callback) => {
+                            console.log('Storage listener added');
+                            // Simulate storage changes
+                            window.addEventListener('storage', (e) => {
+                                if (e.key && e.key.startsWith('upe-')) {
+                                    callback({ [e.key.replace('upe-', '')]: { newValue: e.newValue } }, 'local');
+                                }
+                            });
+                        }
+                    }
+                }
+            },
+            runtime: {
+                getURL: (path) => path,
+                sendMessage: (message, callback) => {
+                    console.log('Runtime message:', message);
+                    if (callback) callback();
+                }
+            }
+        };
+
+        // Mock Socket.IO
+        window.io = (url) => {
+            console.log('Mock Socket.IO connecting to:', url);
+            const mockSocket = {
+                connected: true,
+                on: (event, callback) => {
+                    console.log('Socket event listener:', event);
+                    if (event === 'connect') {
+                        setTimeout(() => callback(), 100);
+                    }
+                },
+                emit: (event, data) => {
+                    console.log('Socket emit:', event, data);
+                    updateSyncStatus(`Emitted: ${event}${data ? ' (' + JSON.stringify(data) + ')' : ''}`);
+                },
+                once: (event, callback) => {
+                    console.log('Socket once listener:', event);
+                    if (event === 'connect') {
+                        setTimeout(() => callback(), 100);
+                    }
+                },
+                connect: () => {
+                    console.log('Socket connect called');
+                    setTimeout(() => {
+                        mockSocket.connected = true;
+                        mockSocket.on('connect', () => {})();
+                    }, 100);
+                }
+            };
+            return mockSocket;
+        };
+
+        // Mock PeerJS
+        window.Peer = class {
+            constructor(id, options) {
+                this.id = id || 'mock-peer-' + Math.random().toString(36).substring(2, 8);
+                console.log('Mock Peer created:', this.id);
+            }
+            on(event, callback) {
+                console.log('Peer event listener:', event);
+            }
+        };
+
+        // Update status
+        function updateStatus(message) {
+            document.getElementById('status').textContent = message;
+        }
+
+        function updateSyncStatus(message) {
+            document.getElementById('sync-status').textContent = message;
+        }
+
+        // Update debug info
+        function updateDebugInfo() {
+            const video = document.getElementById('test-video');
+            const info = `
+                Current Time: ${video.currentTime.toFixed(2)}s<br>
+                Duration: ${video.duration.toFixed(2)}s<br>
+                Paused: ${video.paused}<br>
+                Ready State: ${video.readyState}<br>
+                Network State: ${video.networkState}
+            `;
+            document.getElementById('video-info').innerHTML = info;
+        }
+
+        // Update extension info
+        function updateExtensionInfo() {
+            chrome.storage.local.get(['roomId', 'peerId', 'partyActive', 'pendingStartTime'], (result) => {
+                const info = `
+                    Room ID: ${result.roomId || 'None'}<br>
+                    Peer ID: ${result.peerId || 'None'}<br>
+                    Party Active: ${result.partyActive ? 'Yes' : 'No'}<br>
+                    Pending Start Time: ${result.pendingStartTime || 'None'}
+                `;
+                document.getElementById('extension-status').innerHTML = info;
+            });
+        }
+
+        // Test invite link functionality
+        function testInviteLink() {
+            const roomId = 'test-room-' + Math.random().toString(36).substring(2, 8);
+            const startTime = Math.floor(Math.random() * 60) + 10; // Random time between 10-70 seconds
+            
+            // Simulate invite link parameters
+            const url = new URL(window.location.href);
+            url.hash = `upeRoom=${roomId}&startTime=${startTime}`;
+            
+            console.log('Testing invite link:', url.toString());
+            updateStatus(`Testing invite link with room: ${roomId}, start time: ${startTime}s`);
+            
+            // Simulate the invite link handling
+            chrome.storage.local.set({
+                roomId: roomId,
+                peerId: 'test-peer-' + Math.random().toString(36).substring(2, 8),
+                partyActive: true,
+                pendingStartTime: startTime
+            }, () => {
+                updateExtensionInfo();
+                updateStatus(`Invite link applied! Room: ${roomId}, Start time: ${startTime}s`);
+            });
+        }
+
+        // Clear room
+        function clearRoom() {
+            chrome.storage.local.set({
+                roomId: '',
+                peerId: '',
+                partyActive: false,
+                pendingStartTime: null
+            }, () => {
+                updateExtensionInfo();
+                updateStatus('Room cleared');
+                updateSyncStatus('Waiting for sync connection...');
+            });
+        }
+
+        // Set up video event listeners
+        const video = document.getElementById('test-video');
+        video.addEventListener('play', () => {
+            console.log('Video play event');
+            updateStatus('Video playing');
+        });
+        video.addEventListener('pause', () => {
+            console.log('Video pause event');
+            updateStatus('Video paused');
+        });
+        video.addEventListener('seeked', () => {
+            console.log('Video seeked event');
+            updateStatus('Video seeked');
+        });
+        video.addEventListener('timeupdate', updateDebugInfo);
+        video.addEventListener('loadedmetadata', () => {
+            updateDebugInfo();
+            updateStatus('Video loaded and ready');
+        });
+
+        // Initialize
+        updateStatus('Test page loaded. Check console for extension logs.');
+        updateExtensionInfo();
+        
+        // Update extension info periodically
+        setInterval(updateExtensionInfo, 2000);
+    </script>
+</body>
+</html>

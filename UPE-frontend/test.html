@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Sync Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        video { width: 100%; max-width: 600px; margin: 20px 0; }
+        .controls { margin: 20px 0; }
+        button { margin: 5px; padding: 10px; }
+        .status { background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Video Sync Test Page</h1>
+    <div class="status" id="status">Loading...</div>
+    
+    <video id="test-video" controls>
+        <source src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" type="video/mp4">
+        Your browser does not support the video tag.
+    </video>
+    
+    <div class="controls">
+        <button onclick="document.getElementById('test-video').play()">Play</button>
+        <button onclick="document.getElementById('test-video').pause()">Pause</button>
+        <button onclick="document.getElementById('test-video').currentTime = 30">Seek to 30s</button>
+        <button onclick="document.getElementById('test-video').currentTime = 60">Seek to 60s</button>
+    </div>
+    
+    <div>
+        <h3>Debug Info:</h3>
+        <div id="debug-info"></div>
+    </div>
+
+    <script>
+        // Simulate extension environment
+        window.chrome = {
+            storage: {
+                local: {
+                    get: (keys, callback) => {
+                        const result = {
+                            roomId: 'test-room-' + Math.random().toString(36).substring(2, 8),
+                            peerId: 'test-peer-' + Math.random().toString(36).substring(2, 8),
+                            partyActive: true
+                        };
+                        callback(result);
+                    },
+                    set: (data, callback) => {
+                        console.log('Storage set:', data);
+                        if (callback) callback();
+                    },
+                    onChanged: {
+                        addListener: (callback) => {
+                            console.log('Storage listener added');
+                        }
+                    }
+                }
+            },
+            runtime: {
+                getURL: (path) => path,
+                sendMessage: (message, callback) => {
+                    console.log('Runtime message:', message);
+                    if (callback) callback();
+                }
+            }
+        };
+
+        // Mock Socket.IO
+        window.io = (url) => {
+            console.log('Mock Socket.IO connecting to:', url);
+            return {
+                on: (event, callback) => {
+                    console.log('Socket event listener:', event);
+                    if (event === 'connect') {
+                        setTimeout(() => callback(), 100);
+                    }
+                },
+                emit: (event, data) => {
+                    console.log('Socket emit:', event, data);
+                },
+                connected: true
+            };
+        };
+
+        // Mock PeerJS
+        window.Peer = class {
+            constructor(id, options) {
+                this.id = id || 'mock-peer-' + Math.random().toString(36).substring(2, 8);
+                console.log('Mock Peer created:', this.id);
+            }
+            on(event, callback) {
+                console.log('Peer event listener:', event);
+            }
+        };
+
+        // Update status
+        function updateStatus(message) {
+            document.getElementById('status').textContent = message;
+        }
+
+        // Update debug info
+        function updateDebugInfo() {
+            const video = document.getElementById('test-video');
+            const info = `
+                Current Time: ${video.currentTime.toFixed(2)}s<br>
+                Duration: ${video.duration.toFixed(2)}s<br>
+                Paused: ${video.paused}<br>
+                Ready State: ${video.readyState}<br>
+                Network State: ${video.networkState}
+            `;
+            document.getElementById('debug-info').innerHTML = info;
+        }
+
+        // Set up video event listeners
+        const video = document.getElementById('test-video');
+        video.addEventListener('play', () => {
+            console.log('Video play event');
+            updateStatus('Video playing');
+        });
+        video.addEventListener('pause', () => {
+            console.log('Video pause event');
+            updateStatus('Video paused');
+        });
+        video.addEventListener('seeked', () => {
+            console.log('Video seeked event');
+            updateStatus('Video seeked');
+        });
+        video.addEventListener('timeupdate', updateDebugInfo);
+
+        updateStatus('Test page loaded. Check console for extension logs.');
+    </script>
+</body>
+</html>
