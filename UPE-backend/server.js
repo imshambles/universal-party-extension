@@ -47,6 +47,13 @@ io.on('connection', (socket) => {
     if (socket.data.isPeer && (!prevIsPeer || prevPeerId !== peerId)) {
       socket.to(roomId).emit('peer-connected', peerId);
       socket.to(roomId).emit('user-connected', peerId);
+      
+      // Send system message about user joining
+      socket.to(roomId).emit('system-message', {
+        type: 'user-joined',
+        peerId: peerId,
+        text: `A user joined the party`
+      });
 
       // Send existing peers to this newly joined peer
       try {
@@ -75,6 +82,13 @@ io.on('connection', (socket) => {
     if (isPeer) {
       socket.to(roomId).emit('peer-disconnected', peerId);
       socket.to(roomId).emit('user-disconnected', peerId);
+      
+      // Send system message about user leaving
+      socket.to(roomId).emit('system-message', {
+        type: 'user-left',
+        peerId: peerId,
+        text: `A user left the party`
+      });
     }
   });
 
@@ -87,25 +101,28 @@ io.on('connection', (socket) => {
   });
 
   // Video control events
-  socket.on('play-video', () => {
+  socket.on('play-video', (payload) => {
     const { roomId, peerId } = socket.data || {};
     if (!roomId) return;
-    console.log(`[SYNC] play-video from peer ${peerId} in room ${roomId}`);
-    socket.to(roomId).emit('play-video');
+    const displayName = payload && payload.displayName ? payload.displayName : peerId;
+    console.log(`[SYNC] play-video from ${displayName} in room ${roomId}`);
+    socket.to(roomId).emit('play-video', { from: peerId, displayName });
   });
 
-  socket.on('pause-video', () => {
+  socket.on('pause-video', (payload) => {
     const { roomId, peerId } = socket.data || {};
     if (!roomId) return;
-    console.log(`[SYNC] pause-video from peer ${peerId} in room ${roomId}`);
-    socket.to(roomId).emit('pause-video');
+    const displayName = payload && payload.displayName ? payload.displayName : peerId;
+    console.log(`[SYNC] pause-video from ${displayName} in room ${roomId}`);
+    socket.to(roomId).emit('pause-video', { from: peerId, displayName });
   });
 
-  socket.on('seek-video', (time) => {
+  socket.on('seek-video', (time, payload) => {
     const { roomId, peerId } = socket.data || {};
     if (!roomId) return;
-    console.log(`[SYNC] seek-video to ${time} from peer ${peerId} in room ${roomId}`);
-    socket.to(roomId).emit('seek-video', time);
+    const displayName = payload && payload.displayName ? payload.displayName : peerId;
+    console.log(`[SYNC] seek-video to ${time} from ${displayName} in room ${roomId}`);
+    socket.to(roomId).emit('seek-video', time, { from: peerId, displayName });
   });
 
   // Text chat relay
@@ -116,9 +133,10 @@ io.on('connection', (socket) => {
       const msg = {
         from: peerId,
         text: String((payload && payload.text) || ''),
+        displayName: String((payload && payload.displayName) || peerId),
         ts: Date.now(),
       };
-      console.log(`[CHAT] ${roomId} ${msg.from}: ${msg.text}`);
+      console.log(`[CHAT] ${roomId} ${msg.displayName}: ${msg.text}`);
       socket.to(roomId).emit('chat-message', msg);
     } catch (e) {
       console.error('Error relaying chat message', e);

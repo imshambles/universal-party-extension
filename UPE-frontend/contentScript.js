@@ -3,6 +3,7 @@
 let socket;
 let roomId;
 let peerId;
+let displayName = '';
 let initialized = false;
 let listenersSetup = false;
 let suppressEvents = false;
@@ -36,32 +37,69 @@ function ensureSocket() {
 
         // Receive sync events with suppression to avoid loops
         const getActiveVideo = () => currentVideo || findPrimaryVideo();
-        socket.on('play-video', () => {
+        socket.on('play-video', (data) => {
             const video = getActiveVideo();
-            console.log('[SYNC] Received play-video');
+            console.log('[SYNC] Received play-video', data);
             if (video) {
                 suppressEvents = true;
                 video.play().catch(() => {});
                 setTimeout(() => { suppressEvents = false; }, 250);
             }
+            // Show system message
+            if (data && data.displayName) {
+                upeAppendMessage({ 
+                    from: 'system', 
+                    text: `${data.displayName} played the video`,
+                    type: 'system'
+                });
+            }
         });
-        socket.on('pause-video', () => {
+        socket.on('pause-video', (data) => {
             const video = getActiveVideo();
-            console.log('[SYNC] Received pause-video');
+            console.log('[SYNC] Received pause-video', data);
             if (video) {
                 suppressEvents = true;
                 video.pause();
                 setTimeout(() => { suppressEvents = false; }, 250);
             }
+            // Show system message
+            if (data && data.displayName) {
+                upeAppendMessage({ 
+                    from: 'system', 
+                    text: `${data.displayName} paused the video`,
+                    type: 'system'
+                });
+            }
         });
-        socket.on('seek-video', (time) => {
+        socket.on('seek-video', (time, data) => {
             const video = getActiveVideo();
-            console.log('[SYNC] Received seek-video', time);
+            console.log('[SYNC] Received seek-video', time, data);
             if (video && typeof time === 'number') {
                 suppressEvents = true;
                 try { video.currentTime = time; } catch {}
                 setTimeout(() => { suppressEvents = false; }, 250);
             }
+            // Show system message with formatted time
+            if (data && data.displayName) {
+                const minutes = Math.floor(time / 60);
+                const seconds = Math.floor(time % 60);
+                const timeString = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                upeAppendMessage({ 
+                    from: 'system', 
+                    text: `${data.displayName} skipped to ${timeString}`,
+                    type: 'system'
+                });
+            }
+        });
+        
+        // Handle system messages
+        socket.on('system-message', (data) => {
+            console.log('[SYNC] Received system message:', data);
+            upeAppendMessage({ 
+                from: 'system', 
+                text: data.text,
+                type: 'system'
+            });
         });
     } else if (!socket.connected) {
         try { socket.connect(); } catch (e) { console.warn('Socket connect error', e); }
@@ -84,6 +122,15 @@ function joinRoom() {
         console.log(`Joining room ${roomId} with CONTROL ID ${controlId}`);
         socket.emit('join-room', roomId, controlId);
         setupVideoListeners();
+        
+        // Show system message when joining room
+        setTimeout(() => {
+            upeAppendMessage({ 
+                from: 'system', 
+                text: 'Joined the party! Video sync is now active.',
+                type: 'system'
+            });
+        }, 500);
     } else {
         console.log('Cannot join room yet:', { 
             roomId: !!roomId, 
@@ -159,14 +206,14 @@ function setupVideoListeners() {
         if (suppressEvents) return;
         console.log('[SYNC] Emitting play-video');
         if (socket && socket.connected) {
-            socket.emit('play-video');
+            socket.emit('play-video', { displayName: displayName || 'You' });
         } else {
             console.warn('[SYNC] Socket not connected, cannot emit play-video');
             // Try to reconnect and emit
             if (socket) {
                 socket.once('connect', () => {
                     console.log('[SYNC] Reconnected, emitting play-video');
-                    socket.emit('play-video');
+                    socket.emit('play-video', { displayName: displayName || 'You' });
                 });
                 socket.connect();
             }
@@ -176,14 +223,14 @@ function setupVideoListeners() {
         if (suppressEvents) return;
         console.log('[SYNC] Emitting pause-video');
         if (socket && socket.connected) {
-            socket.emit('pause-video');
+            socket.emit('pause-video', { displayName: displayName || 'You' });
         } else {
             console.warn('[SYNC] Socket not connected, cannot emit pause-video');
             // Try to reconnect and emit
             if (socket) {
                 socket.once('connect', () => {
                     console.log('[SYNC] Reconnected, emitting pause-video');
-                    socket.emit('pause-video');
+                    socket.emit('pause-video', { displayName: displayName || 'You' });
                 });
                 socket.connect();
             }
@@ -193,14 +240,14 @@ function setupVideoListeners() {
         if (suppressEvents) return;
         console.log('[SYNC] Emitting seek-video', video.currentTime);
         if (socket && socket.connected) {
-            socket.emit('seek-video', video.currentTime);
+            socket.emit('seek-video', video.currentTime, { displayName: displayName || 'You' });
         } else {
             console.warn('[SYNC] Socket not connected, cannot emit seek-video');
             // Try to reconnect and emit
             if (socket) {
                 socket.once('connect', () => {
                     console.log('[SYNC] Reconnected, emitting seek-video');
-                    socket.emit('seek-video', video.currentTime);
+                    socket.emit('seek-video', video.currentTime, { displayName: displayName || 'You' });
                 });
                 socket.connect();
             }
@@ -321,6 +368,15 @@ function openVideoChatWindow() {
                 ensureOverlayReady();
                 // Try to move from title page to player and start playback
                 attemptAutoStartFromInvite();
+                
+                // Show system message for invite join
+                setTimeout(() => {
+                    upeAppendMessage({ 
+                        from: 'system', 
+                        text: 'Joined party via invite link!',
+                        type: 'system'
+                    });
+                }, 1000);
             });
         }
     } catch (e) {
@@ -405,19 +461,25 @@ function attemptAutoStartFromInvite() {
 
 
 // Main initialization
-chrome.storage.local.get(['roomId', 'peerId', 'pendingStartTime', 'partyActive'], (result) => {
+chrome.storage.local.get(['roomId', 'peerId', 'pendingStartTime', 'partyActive', 'displayName'], (result) => {
     if (result.roomId && result.peerId) {
         roomId = result.roomId;
         peerId = result.peerId;
         partyActive = !!result.partyActive;
+        displayName = result.displayName || '';
         if (typeof result.pendingStartTime === 'number' && isFinite(result.pendingStartTime)) {
             pendingStartTime = result.pendingStartTime;
         }
         // Initialize socket (overlay shows on playback or when room set via popup)
         initializeSocket();
-        console.log('Room initialized:', { roomId, peerId, partyActive });
+        console.log('Room initialized:', { roomId, peerId, partyActive, displayName });
     } else {
         console.log('No room set yet; open the extension popup to create/join a room.');
+    }
+    
+    // Load display name even if no room is set
+    if (result.displayName) {
+        displayName = result.displayName;
     }
 });
 
@@ -428,6 +490,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (changes.peerId) peerId = changes.peerId.newValue;
     if (changes.partyActive) partyActive = !!changes.partyActive.newValue;
     if (changes.pendingStartTime) pendingStartTime = changes.pendingStartTime.newValue;
+    if (changes.displayName) displayName = changes.displayName.newValue || '';
     // Do not join until user starts party or invite has a timestamp; on play we activate
     initializeSocket();
     ensureSocket();
@@ -442,6 +505,16 @@ chatButton.style.right = '10px';
 chatButton.style.zIndex = '9999';
 chatButton.addEventListener('click', openVideoChatWindow);
 document.body.appendChild(chatButton);
+
+// Add debug functions to window for console access
+window.UPE = {
+    checkStreamStatus,
+    ensureLocalStream,
+    ensurePeer,
+    getPendingCalls: () => pendingCalls,
+    getActivePeers: () => Object.keys(upePeers),
+    getLocalStream: () => upeLocalStream
+};
 
 // Observe DOM changes to attach listeners when video appears
 try {
@@ -472,9 +545,23 @@ function ensureSidebar() {
           <button id="upe-close">×</button>
         </div>
       </header>
+      <div class="user-info">
+        <input id="upe-display-name" placeholder="Enter your name..." maxlength="20" />
+        <button id="upe-set-name">Set Name</button>
+      </div>
       <div class="videos">
         <video id="upe-local" autoplay muted playsinline></video>
         <div id="upe-remote-container"></div>
+      </div>
+      <div class="video-controls">
+        <button id="upe-mute-audio" class="control-btn" title="Mute Audio">
+          <span class="icon">🔊</span>
+          <span class="text">Mute</span>
+        </button>
+        <button id="upe-mute-video" class="control-btn" title="Mute Video">
+          <span class="icon">📹</span>
+          <span class="text">Video</span>
+        </button>
       </div>
       <div class="chat">
         <div id="upe-messages" class="messages"></div>
@@ -493,10 +580,30 @@ function ensureSidebar() {
     document.getElementById('upe-close').addEventListener('click', () => {
         sidebar.remove();
     });
+    
+    // Add mute controls
+    document.getElementById('upe-mute-audio').addEventListener('click', toggleAudioMute);
+    document.getElementById('upe-mute-video').addEventListener('click', toggleVideoMute);
+    
+    // Add name setting functionality
+    document.getElementById('upe-set-name').addEventListener('click', setDisplayName);
+    document.getElementById('upe-display-name').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            setDisplayName();
+        }
+    });
 
     if (roomId) {
         const label = document.getElementById('upe-room-label');
         if (label) label.textContent = roomId;
+    }
+    
+    // Populate display name input if it exists
+    if (displayName) {
+        const nameInput = document.getElementById('upe-display-name');
+        if (nameInput) {
+            nameInput.value = displayName;
+        }
     }
 async function copyInviteLink() {
     try {
@@ -520,20 +627,64 @@ async function copyInviteLink() {
 }
 
 }
+// Set display name function
+function setDisplayName() {
+    const nameInput = document.getElementById('upe-display-name');
+    if (!nameInput) return;
+    
+    const newName = nameInput.value.trim();
+    if (newName.length === 0) {
+        upeAppendMessage({ from: 'system', text: 'Please enter a valid name' });
+        return;
+    }
+    
+    displayName = newName;
+    chrome.storage.local.set({ displayName: displayName }, () => {
+        upeAppendMessage({ from: 'system', text: `Name set to: ${displayName}` });
+        console.log('[UPE] Display name set to:', displayName);
+    });
+}
+
+// Get display name for a user
+function getDisplayName(userId, msgDisplayName) {
+    // If message has a display name, use it
+    if (msgDisplayName) {
+        return msgDisplayName;
+    }
+    
+    // For our own messages
+    if (userId === peerId || userId === 'me') {
+        return displayName || 'You';
+    }
+    
+    // For other users (fallback to peer ID)
+    return userId || 'Unknown';
+}
+
 // Simple chat helpers
 function upeAppendMessage(msg) {
     try {
         const box = document.getElementById('upe-messages');
         if (!box) return;
         const div = document.createElement('div');
-        div.className = 'msg';
-        const from = document.createElement('span');
-        from.className = 'from';
-        from.textContent = (msg.from || 'me') + ':';
-        const text = document.createElement('span');
-        text.textContent = ' ' + (msg.text || '');
-        div.appendChild(from);
-        div.appendChild(text);
+        
+        // Handle system messages differently
+        if (msg.type === 'system') {
+            div.className = 'msg system-msg';
+            const text = document.createElement('span');
+            text.textContent = msg.text || '';
+            div.appendChild(text);
+        } else {
+            div.className = 'msg';
+            const from = document.createElement('span');
+            from.className = 'from';
+            from.textContent = getDisplayName(msg.from, msg.displayName) + ':';
+            const text = document.createElement('span');
+            text.textContent = ' ' + (msg.text || '');
+            div.appendChild(from);
+            div.appendChild(text);
+        }
+        
         box.appendChild(div);
         box.scrollTop = box.scrollHeight;
     } catch (e) { console.warn('appendMessage failed', e); }
@@ -550,7 +701,10 @@ function setupChat() {
         sendBtn.onclick = () => {
             const text = input.value.trim();
             if (!text) return;
-            const payload = { text };
+            const payload = { 
+                text,
+                displayName: displayName || 'You'
+            };
             socket.emit('chat-message', payload);
             upeAppendMessage({ from: 'me', text });
             input.value = '';
@@ -571,6 +725,7 @@ function setupChat() {
 let upePeer;
 let upeLocalStream;
 const upePeers = {};
+const pendingCalls = []; // Queue for calls that arrive before stream is ready
 
 function ensurePeer() {
     if (upePeer) return upePeer;
@@ -594,14 +749,43 @@ function ensurePeer() {
     });
 
     upePeer.on('call', (call) => {
-        if (!upeLocalStream) { console.warn('[UPE] local stream not ready, delaying answer'); return; }
-        call.answer(upeLocalStream);
-        call.on('stream', (s) => upeAttachRemote(s, call.peer));
-        call.on('close', () => console.log('[UPE] call closed', call.peer));
-
+        if (!upeLocalStream) { 
+            console.warn('[UPE] local stream not ready, queuing call from', call.peer);
+            pendingCalls.push(call);
+            
+            // Set a timeout to prevent infinite queuing
+            setTimeout(() => {
+                const index = pendingCalls.indexOf(call);
+                if (index > -1) {
+                    console.warn('[UPE] Removing timed out call from', call.peer);
+                    pendingCalls.splice(index, 1);
+                }
+            }, 30000); // 30 second timeout
+            
+            return; 
+        }
+        answerCall(call);
     });
 
     return upePeer;
+}
+
+function answerCall(call) {
+    if (!upeLocalStream) {
+        console.warn('[UPE] Cannot answer call - no local stream');
+        return;
+    }
+    
+    console.log('[UPE] Answering call from', call.peer);
+    call.answer(upeLocalStream);
+    call.on('stream', (s) => upeAttachRemote(s, call.peer));
+    call.on('close', () => {
+        console.log('[UPE] call closed', call.peer);
+        if (upePeers[call.peer]) {
+            delete upePeers[call.peer];
+        }
+    });
+    upePeers[call.peer] = call;
 }
 
 function ensureLocalStream() {
@@ -610,16 +794,111 @@ function ensureLocalStream() {
         upeLocalStream = stream;
         const lv = document.getElementById('upe-local');
         if (lv) { lv.srcObject = stream; lv.addEventListener('loadedmetadata', () => lv.play()); }
+        
+        // Update mute button states
+        updateMuteButtonStates();
+        
+        // Answer any pending calls now that stream is ready
+        while (pendingCalls.length > 0) {
+            const call = pendingCalls.shift();
+            console.log('[UPE] Answering queued call from', call.peer);
+            answerCall(call);
+        }
+        
         return stream;
+    }).catch((error) => {
+        console.error('[UPE] Failed to get user media:', error);
+        throw error;
     });
 }
 
+// Check stream status for debugging
+function checkStreamStatus() {
+    console.log('[UPE] Stream status check:');
+    console.log('- Local stream exists:', !!upeLocalStream);
+    if (upeLocalStream) {
+        const audioTracks = upeLocalStream.getAudioTracks();
+        const videoTracks = upeLocalStream.getVideoTracks();
+        console.log('- Audio tracks:', audioTracks.length);
+        console.log('- Video tracks:', videoTracks.length);
+        console.log('- Audio enabled:', audioTracks.length > 0 ? audioTracks[0].enabled : 'N/A');
+        console.log('- Video enabled:', videoTracks.length > 0 ? videoTracks[0].enabled : 'N/A');
+    }
+    console.log('- Pending calls:', pendingCalls.length);
+    console.log('- Active peers:', Object.keys(upePeers).length);
+}
+
+// Update mute button states based on current stream state
+function updateMuteButtonStates() {
+    if (!upeLocalStream) return;
+    
+    const audioTracks = upeLocalStream.getAudioTracks();
+    const videoTracks = upeLocalStream.getVideoTracks();
+    
+    // Update audio button
+    if (audioTracks.length > 0) {
+        const audioBtn = document.getElementById('upe-mute-audio');
+        if (audioBtn) {
+            const icon = audioBtn.querySelector('.icon');
+            const text = audioBtn.querySelector('.text');
+            
+            if (audioTracks[0].enabled) {
+                icon.textContent = '🔊';
+                text.textContent = 'Mute';
+                audioBtn.title = 'Mute Audio';
+                audioBtn.classList.remove('muted');
+            } else {
+                icon.textContent = '🔇';
+                text.textContent = 'Unmute';
+                audioBtn.title = 'Unmute Audio';
+                audioBtn.classList.add('muted');
+            }
+        }
+    }
+    
+    // Update video button
+    if (videoTracks.length > 0) {
+        const videoBtn = document.getElementById('upe-mute-video');
+        if (videoBtn) {
+            const icon = videoBtn.querySelector('.icon');
+            const text = videoBtn.querySelector('.text');
+            
+            if (videoTracks[0].enabled) {
+                icon.textContent = '📹';
+                text.textContent = 'Video';
+                videoBtn.title = 'Mute Video';
+                videoBtn.classList.remove('muted');
+            } else {
+                icon.textContent = '🚫';
+                text.textContent = 'Show';
+                videoBtn.title = 'Show Video';
+                videoBtn.classList.add('muted');
+            }
+        }
+    }
+}
+
 function upeConnectTo(uid) {
+    console.log('[UPE] Connecting to user:', uid);
     ensureLocalStream().then((stream) => {
+        console.log('[UPE] Local stream ready, calling user:', uid);
         const call = ensurePeer().call(uid, stream);
-        call.on('stream', (s) => upeAttachRemote(s, uid));
-        call.on('close', () => console.log('[UPE] outbound call closed', uid));
+        call.on('stream', (s) => {
+            console.log('[UPE] Received stream from:', uid);
+            upeAttachRemote(s, uid);
+        });
+        call.on('close', () => {
+            console.log('[UPE] outbound call closed', uid);
+            if (upePeers[uid]) {
+                delete upePeers[uid];
+            }
+        });
+        call.on('error', (error) => {
+            console.error('[UPE] Call error with', uid, ':', error);
+        });
         upePeers[uid] = call;
+    }).catch((error) => {
+        console.error('[UPE] Failed to connect to', uid, ':', error);
     });
 }
 
@@ -637,14 +916,79 @@ function upeAttachRemote(stream, uid) {
     v.srcObject = stream;
     v.addEventListener('loadedmetadata', () => v.play());
 }
+// Toggle audio mute
+function toggleAudioMute() {
+    if (!upeLocalStream) return;
+    
+    const audioTracks = upeLocalStream.getAudioTracks();
+    if (audioTracks.length > 0) {
+        const isMuted = audioTracks[0].enabled;
+        audioTracks[0].enabled = !isMuted;
+        
+        const btn = document.getElementById('upe-mute-audio');
+        const icon = btn.querySelector('.icon');
+        const text = btn.querySelector('.text');
+        
+        if (isMuted) {
+            icon.textContent = '🔇';
+            text.textContent = 'Unmute';
+            btn.title = 'Unmute Audio';
+            btn.classList.add('muted');
+        } else {
+            icon.textContent = '🔊';
+            text.textContent = 'Mute';
+            btn.title = 'Mute Audio';
+            btn.classList.remove('muted');
+        }
+        
+        console.log('Audio', isMuted ? 'muted' : 'unmuted');
+    }
+}
+
+// Toggle video mute
+function toggleVideoMute() {
+    if (!upeLocalStream) return;
+    
+    const videoTracks = upeLocalStream.getVideoTracks();
+    if (videoTracks.length > 0) {
+        const isMuted = videoTracks[0].enabled;
+        videoTracks[0].enabled = !isMuted;
+        
+        const btn = document.getElementById('upe-mute-video');
+        const icon = btn.querySelector('.icon');
+        const text = btn.querySelector('.text');
+        
+        if (isMuted) {
+            icon.textContent = '🚫';
+            text.textContent = 'Show';
+            btn.title = 'Show Video';
+            btn.classList.add('muted');
+        } else {
+            icon.textContent = '📹';
+            text.textContent = 'Video';
+            btn.title = 'Mute Video';
+            btn.classList.remove('muted');
+        }
+        
+        console.log('Video', isMuted ? 'muted' : 'unmuted');
+    }
+}
+
 // Ensure sidebar and peer are ready when room is set
 function ensureOverlayReady() {
+    console.log('[UPE] Ensuring overlay is ready...');
     ensureSidebar();
     overlayActive = true;
     ensureSocket();
     setupChat();
     ensurePeer();
-    ensureLocalStream();
+    
+    // Ensure local stream is ready before proceeding
+    ensureLocalStream().then(() => {
+        console.log('[UPE] Overlay ready with local stream');
+    }).catch((error) => {
+        console.error('[UPE] Failed to initialize overlay:', error);
+    });
 }
 
 // Smart activation: do not auto-show overlay on room set anymore

@@ -172,6 +172,55 @@ function attachRemoteStream(stream) {
     }
 }
 
+// Mute/Unmute Audio
+document.getElementById('mute-audio-button').addEventListener('click', () => {
+    if (localStream) {
+        const audioTracks = localStream.getAudioTracks();
+        if (audioTracks.length > 0) {
+            const isMuted = audioTracks[0].enabled;
+            audioTracks[0].enabled = !isMuted;
+            
+            const button = document.getElementById('mute-audio-button');
+            if (isMuted) {
+                button.textContent = 'Unmute Audio';
+                button.style.backgroundColor = '#dc3545';
+            } else {
+                button.textContent = 'Mute Audio';
+                button.style.backgroundColor = '#007bff';
+            }
+            
+            console.log('Audio', isMuted ? 'muted' : 'unmuted');
+        }
+    }
+});
+
+// Mute/Unmute Video
+document.getElementById('mute-video-button').addEventListener('click', () => {
+    if (localStream) {
+        const videoTracks = localStream.getVideoTracks();
+        if (videoTracks.length > 0) {
+            const isMuted = videoTracks[0].enabled;
+            videoTracks[0].enabled = !isMuted;
+            
+            const button = document.getElementById('mute-video-button');
+            if (isMuted) {
+                button.textContent = 'Show Video';
+                button.style.backgroundColor = '#dc3545';
+            } else {
+                button.textContent = 'Mute Video';
+                button.style.backgroundColor = '#007bff';
+            }
+            
+            console.log('Video', isMuted ? 'muted' : 'unmuted');
+        }
+    }
+});
+
+// End Call
+document.getElementById('end-call-button').addEventListener('click', () => {
+    window.close();
+});
+
 // Handle window closing
 window.addEventListener('beforeunload', () => {
     socket.disconnect();

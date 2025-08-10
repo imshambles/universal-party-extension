@@ -34,6 +34,8 @@
         <button onclick="document.getElementById('test-video').currentTime = 60">⏭️ Seek to 60s</button>
         <button onclick="testInviteLink()">🔗 Test Invite Link</button>
         <button onclick="clearRoom()">🗑️ Clear Room</button>
+        <button onclick="testMuteControls()">🎤 Test Mute Controls</button>
+        <button onclick="testDisplayName()">👤 Test Display Name</button>
     </div>
     
     <div class="debug" id="debug-info">
@@ -158,12 +160,13 @@
 
         // Update extension info
         function updateExtensionInfo() {
-            chrome.storage.local.get(['roomId', 'peerId', 'partyActive', 'pendingStartTime'], (result) => {
+            chrome.storage.local.get(['roomId', 'peerId', 'partyActive', 'pendingStartTime', 'displayName'], (result) => {
                 const info = `
                     Room ID: ${result.roomId || 'None'}<br>
                     Peer ID: ${result.peerId || 'None'}<br>
                     Party Active: ${result.partyActive ? 'Yes' : 'No'}<br>
-                    Pending Start Time: ${result.pendingStartTime || 'None'}
+                    Pending Start Time: ${result.pendingStartTime || 'None'}<br>
+                    Display Name: ${result.displayName || 'None'}
                 `;
                 document.getElementById('extension-status').innerHTML = info;
             });
@@ -204,6 +207,53 @@
                 updateExtensionInfo();
                 updateStatus('Room cleared');
                 updateSyncStatus('Waiting for sync connection...');
+            });
+        }
+
+        // Test mute controls
+        function testMuteControls() {
+            updateStatus('Testing mute controls...');
+            console.log('Testing mute controls functionality');
+            
+            // Simulate mute controls in the sidebar
+            const sidebar = document.getElementById('upe-sidebar');
+            if (sidebar) {
+                const muteAudioBtn = sidebar.querySelector('#upe-mute-audio');
+                const muteVideoBtn = sidebar.querySelector('#upe-mute-video');
+                
+                if (muteAudioBtn) {
+                    console.log('Audio mute button found:', muteAudioBtn);
+                    updateSyncStatus('Audio mute button available');
+                } else {
+                    console.log('Audio mute button not found');
+                    updateSyncStatus('Audio mute button not found');
+                }
+                
+                if (muteVideoBtn) {
+                    console.log('Video mute button found:', muteVideoBtn);
+                    updateSyncStatus('Video mute button available');
+                } else {
+                    console.log('Video mute button not found');
+                    updateSyncStatus('Video mute button not found');
+                }
+            } else {
+                console.log('Sidebar not found - start a party first');
+                updateSyncStatus('Sidebar not found - start a party first');
+            }
+        }
+
+        // Test display name functionality
+        function testDisplayName() {
+            updateStatus('Testing display name...');
+            console.log('Testing display name functionality');
+            
+            // Simulate setting a display name
+            chrome.storage.local.set({
+                displayName: 'TestUser-' + Math.random().toString(36).substring(2, 6)
+            }, () => {
+                updateExtensionInfo();
+                updateStatus('Display name set - check extension info');
+                updateSyncStatus('Display name functionality available');
             });
         }
 
