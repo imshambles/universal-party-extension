@@ -8,68 +8,125 @@ const server = http.createServer(app);
 
 // Configure CORS options
 const corsOptions = {
-    origin: "*",
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type"],
-    credentials: true,
-    optionSuccessStatus:200
+  origin: '*',
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type'],
+  credentials: true,
+  optionSuccessStatus: 200,
 };
-const debug = require('debug')('socket.io:server');
+
+// Apply CORS to Express
+app.use(cors(corsOptions));
 
 // Initialize Socket.IO server with custom options
 const io = new Server(server, {
-    cors: corsOptions,
-    pingTimeout: 60000, // Increase ping timeout to 60 seconds
-    pingInterval: 25000 // Ping every 25 seconds
+  cors: corsOptions,
+  pingTimeout: 60000, // 60s
+  pingInterval: 25000, // 25s
 });
 
-// Serve static files from the "public" directory
-app.use(express.static('public'));
-
-// Handle Socket.IO connections
 io.on('connection', (socket) => {
-    console.log('New connection:', socket.id);
+  console.log('New connection:', socket.id);
+  socket.data = socket.data || { roomId: null, peerId: null, isPeer: false };
 
-    // Handle joining a room
-    socket.on('join-room', (roomId, peerId) => {
-        console.log(`Attempting to join room: ${roomId} for peer: ${peerId}`);
-        socket.join(roomId);
-        console.log(`User ${peerId} joined room ${roomId}`);
-        socket.to(roomId).emit('user-connected', peerId);
+  // Join or update membership in a room
+  socket.on('join-room', (roomId, peerId) => {
+    const prevPeerId = socket.data.peerId;
+    const prevIsPeer = socket.data.isPeer;
 
-        // Handle user disconnection
-        socket.on('disconnect', (reason) => {
-            console.log(`User ${peerId} disconnected from room ${roomId}. Reason: ${reason}`);
-            console.log('Socket details:', socket.id, socket.connected, socket.disconnected);
-            socket.to(roomId).emit('user-disconnected', peerId);
-        });
+    console.log(`Attempting to join room: ${roomId} for peer: ${peerId}`);
 
-        // Handle socket errors
-        socket.on('error', (error) => {
-            console.error('Socket error:', error);
-        });
+    socket.join(roomId); // idempotent
+    socket.data.roomId = roomId;
+    socket.data.peerId = peerId;
+    socket.data.isPeer = !String(peerId).startsWith('control-');
 
-        // Handle heartbeat from clients
-        socket.on('heartbeat', () => {
-            console.log('Received heartbeat from', socket.id);
-        });
+    console.log(`User ${peerId} joined room ${roomId} (isPeer=${socket.data.isPeer})`);
 
-        // Handle video control events
-        socket.on('play-video', () => {
-            socket.to(roomId).emit('play-video');
-        });
+    // Notify others only when this socket becomes a real peer or peerId changes
+    if (socket.data.isPeer && (!prevIsPeer || prevPeerId !== peerId)) {
+      socket.to(roomId).emit('peer-connected', peerId);
+      socket.to(roomId).emit('user-connected', peerId);
 
-        socket.on('pause-video', () => {
-            socket.to(roomId).emit('pause-video');
-        });
+      // Send existing peers to this newly joined peer
+      try {
+        const room = io.sockets.adapter.rooms.get(roomId);
+        const existingPeers = [];
+        if (room) {
+          for (const sid of room) {
+            if (sid === socket.id) continue;
+            const s = io.sockets.sockets.get(sid);
+            if (s && s.data && s.data.peerId && s.data.isPeer) existingPeers.push(s.data.peerId);
+          }
+        }
+        socket.emit('existing-peers', existingPeers);
+        socket.emit('existing-users', existingPeers); // backward-compat
+      } catch (e) {
+        console.error('Error computing existing users:', e);
+      }
+    }
+  });
 
-        socket.on('seek-video', (time) => {
-            socket.to(roomId).emit('seek-video', time);
-        });
-    });
+  // Common handlers (attached once per socket)
+  socket.on('disconnect', (reason) => {
+    const { roomId, peerId, isPeer } = socket.data || {};
+    if (!roomId || !peerId) return;
+    console.log(`User ${peerId} disconnected from room ${roomId}. Reason: ${reason}`);
+    if (isPeer) {
+      socket.to(roomId).emit('peer-disconnected', peerId);
+      socket.to(roomId).emit('user-disconnected', peerId);
+    }
+  });
+
+  socket.on('error', (error) => {
+    console.error('Socket error:', error);
+  });
+
+  socket.on('heartbeat', () => {
+    console.log('Received heartbeat from', socket.id);
+  });
+
+  // Video control events
+  socket.on('play-video', () => {
+    const { roomId, peerId } = socket.data || {};
+    if (!roomId) return;
+    console.log(`[SYNC] play-video from peer ${peerId} in room ${roomId}`);
+    socket.to(roomId).emit('play-video');
+  });
+
+  socket.on('pause-video', () => {
+    const { roomId, peerId } = socket.data || {};
+    if (!roomId) return;
+    console.log(`[SYNC] pause-video from peer ${peerId} in room ${roomId}`);
+    socket.to(roomId).emit('pause-video');
+  });
+
+  socket.on('seek-video', (time) => {
+    const { roomId, peerId } = socket.data || {};
+    if (!roomId) return;
+    console.log(`[SYNC] seek-video to ${time} from peer ${peerId} in room ${roomId}`);
+    socket.to(roomId).emit('seek-video', time);
+  });
+
+  // Text chat relay
+  socket.on('chat-message', (payload) => {
+    try {
+      const { roomId, peerId } = socket.data || {};
+      if (!roomId) return;
+      const msg = {
+        from: peerId,
+        text: String((payload && payload.text) || ''),
+        ts: Date.now(),
+      };
+      console.log(`[CHAT] ${roomId} ${msg.from}: ${msg.text}`);
+      socket.to(roomId).emit('chat-message', msg);
+    } catch (e) {
+      console.error('Error relaying chat message', e);
+    }
+  });
 });
 
 // Start the server on port 3000
 server.listen(3000, () => {
-    console.log('Signaling server running on port 3000');
+  console.log('Signaling server running on port 3000');
 });
