@@ -4,12 +4,13 @@
   "version": "1.0",
   "permissions": [
     "activeTab",
+    "tabs",
     "scripting",
     "storage",
     "windows"
   ],
   "host_permissions": [
-    "http://localhost:3000/",
+    "https://universal-party-extension.onrender.com/",
     "https://*.peerjs.com/"
   ],
   "background": {
@@ -27,6 +28,8 @@
         "*://*.primevideo.com/*"
       ],
       "js": [
+        "libs/socket.io.min.js",
+        "libs/peerjs.min.js",
         "contentScript.js"
       ]
     }
@@ -34,7 +37,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "video-chat.html"
+        "video-chat.html",
+        "sidebar.css"
       ],
       "matches": [
         "<all_urls>"
@@ -42,6 +46,6 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://localhost:3000 ws://localhost:3000 https://*.peerjs.com wss://*.peerjs.com"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://universal-party-extension.onrender.com wss://universal-party-extension.onrender.com https://*.peerjs.com wss://*.peerjs.com"
   }
 }

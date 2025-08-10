@@ -1,0 +1,71 @@
+/* UPE Sidebar Styles */
+#upe-sidebar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 340px;
+  height: 100vh;
+  background: rgba(12, 12, 14, 0.96);
+  color: #fff;
+  box-shadow: -2px 0 12px rgba(0,0,0,0.4);
+  z-index: 999999; /* above site UI */
+  display: flex;
+  flex-direction: column;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+#upe-sidebar.minimized { height: 42px; width: 320px; }
+#upe-sidebar header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: linear-gradient(180deg, rgba(24,24,28,1) 0%, rgba(18,18,20,1) 100%);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+#upe-sidebar header .title { font-weight: 600; font-size: 14px; letter-spacing: 0.2px; }
+#upe-sidebar header .controls button {
+  background: transparent; color: #bbb; border: 0; cursor: pointer; padding: 6px 8px; border-radius: 6px;
+}
+#upe-sidebar header .controls button:hover { color: #fff; background: rgba(255,255,255,0.08); }
+
+#upe-sidebar .videos {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px;
+  overflow-y: auto;
+  max-height: 45vh;
+}
+#upe-sidebar .videos video {
+  width: 100%;
+  height: 100px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #222;
+}
+
+#upe-sidebar .chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+}
+#upe-sidebar .chat .messages {
+  flex: 1;
+  overflow-y: auto;
+  background: rgba(255,255,255,0.04);
+  border-radius: 8px;
+  padding: 10px;
+}
+#upe-sidebar .chat .messages .msg { margin-bottom: 8px; font-size: 13px; line-height: 1.3; }
+#upe-sidebar .chat .messages .msg .from { color: #7aa2ff; margin-right: 6px; }
+#upe-sidebar .chat .compose { display: flex; gap: 8px; margin-top: 8px; }
+#upe-sidebar .chat .compose input {
+  flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(0,0,0,0.2); color: #fff;
+}
+#upe-sidebar .chat .compose button {
+  padding: 8px 10px; border-radius: 6px; border: 0; background: #5865f2; color: #fff; cursor: pointer;
+}
+#upe-sidebar .chat .compose button:hover { filter: brightness(1.05); }
+

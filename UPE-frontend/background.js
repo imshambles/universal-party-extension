@@ -8,24 +8,7 @@ chrome.runtime.onInstalled.addListener(() => {
 // Listen for messages from content scripts
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Received message:', message);
-
-  if (message.type === 'video-chat') {
-    console.log('Opening video chat window');
-    chrome.windows.create({
-      url: `video-chat.html?roomId=${encodeURIComponent(message.roomId)}&peerId=${encodeURIComponent(message.peerId)}`,
-      type: 'popup',
-      width: 400,
-      height: 500
-    }, (window) => {
-      if (chrome.runtime.lastError) {
-        console.error('Error opening window:', chrome.runtime.lastError);
-      } else {
-        console.log('Video chat window opened successfully');
-      }
-    });
-  }
-
-  // Always return true if you want to send a response asynchronously
+  // No window popups anymore; content scripts inject sidebar overlays directly
   return true;
 });
 
