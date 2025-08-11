@@ -1,4 +1,6 @@
 // contentScript.js
+console.log('[UPE] Content script loaded at URL:', window.location.href);
+
 // Uses global `io` from libs/socket.io.min.js injected via manifest
 let socket;
 let roomId;
@@ -15,12 +17,6 @@ let pendingStartTime = null; // seconds from invite link to seek on first playba
 let upePeerOpenId = null; // last opened PeerJS ID (when available)
 
 let partyActive = false; // only join & show overlay when true
-let joinPromptVisible = false; // whether the 'Join now' prompt is shown
-
-// Pending invite state (do not switch rooms until user confirms)
-let pendingInviteRoom = null;
-let pendingInviteStart = null;
-
 
 // Deduping state for room joins
 let lastControlJoinSig = null;
@@ -418,121 +414,6 @@ function ensureRoomAndOverlay() {
     ensureOverlayReady();
 }
 
-// Show a lightweight 'Join now' prompt for invite flows
-function showJoinNowPrompt(room, startTime) {
-    if (joinPromptVisible) return;
-    joinPromptVisible = true;
-
-    // Remove any existing prompt just in case
-    const existing = document.getElementById('upe-join-prompt');
-    if (existing) existing.remove();
-
-    const pad = '10px';
-    const box = document.createElement('div');
-    box.id = 'upe-join-prompt';
-    box.style.position = 'fixed';
-    box.style.bottom = '20px';
-    box.style.right = '20px';
-    box.style.zIndex = '2147483647';
-    box.style.background = 'rgba(0,0,0,0.85)';
-    box.style.color = '#fff';
-    box.style.padding = pad;
-    box.style.borderRadius = '8px';
-    box.style.boxShadow = '0 6px 18px rgba(0,0,0,0.35)';
-    box.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
-    box.style.fontSize = '14px';
-    box.style.maxWidth = '320px';
-
-    const title = document.createElement('div');
-    title.textContent = 'Join party?';
-    title.style.fontWeight = '600';
-    title.style.marginBottom = '6px';
-    box.appendChild(title);
-
-    const info = document.createElement('div');
-    const timeLabel = (typeof startTime === 'number' && isFinite(startTime))
-        ? ` · start at ${Math.floor(startTime/60)}:${String(Math.floor(startTime%60)).padStart(2,'0')}`
-        : '';
-    info.textContent = `Room ${room}${timeLabel}`;
-    info.style.opacity = '0.9';
-    info.style.marginBottom = '10px';
-    box.appendChild(info);
-
-    const btnRow = document.createElement('div');
-    btnRow.style.display = 'flex';
-    btnRow.style.gap = '8px';
-
-    const joinBtn = document.createElement('button');
-    joinBtn.className = 'upe-join-now';
-    joinBtn.textContent = 'Join now';
-    joinBtn.style.background = '#4F46E5';
-    joinBtn.style.color = '#fff';
-    joinBtn.style.border = 'none';
-    joinBtn.style.padding = '8px 12px';
-    joinBtn.style.borderRadius = '6px';
-    joinBtn.style.cursor = 'pointer';
-
-    const laterBtn = document.createElement('button');
-    laterBtn.textContent = 'Later';
-    laterBtn.style.background = 'transparent';
-    laterBtn.style.color = '#fff';
-    laterBtn.style.border = '1px solid rgba(255,255,255,0.3)';
-    laterBtn.style.padding = '8px 12px';
-    laterBtn.style.borderRadius = '6px';
-    laterBtn.style.cursor = 'pointer';
-
-    btnRow.appendChild(joinBtn);
-    btnRow.appendChild(laterBtn);
-    box.appendChild(btnRow);
-
-    document.body.appendChild(box);
-
-    const hideJoinPrompt = () => {
-        const el = document.getElementById('upe-join-prompt');
-        if (el) el.remove();
-        joinPromptVisible = false;
-    };
-
-    joinBtn.addEventListener('click', () => {
-        try {
-            // Commit pending invite to storage only now
-            if (pendingInviteRoom) {
-                roomId = pendingInviteRoom;
-                peerId = peerId || Math.random().toString(36).substring(2, 15);
-                partyActive = true;
-                const payload = { roomId, peerId, partyActive };
-                if (typeof pendingInviteStart === 'number' && isFinite(pendingInviteStart)) {
-                    pendingStartTime = pendingInviteStart;
-                    payload.pendingStartTime = pendingInviteStart;
-                }
-                chrome.storage.local.set(payload, () => {
-                    initializeSocket();
-                    ensureSocket();
-                    joinRoom();
-                    ensureOverlayReady();
-                    attemptAutoStartFromInvite();
-                });
-            } else {
-                ensureSocket();
-                joinRoom();
-                ensureOverlayReady();
-                attemptAutoStartFromInvite();
-            }
-            setTimeout(() => {
-                upeAppendMessage({ from: 'system', text: 'Joined party via invite link!', type: 'system' });
-            }, 500);
-        } catch (e) {
-            console.warn('Join now failed', e);
-        } finally {
-            hideJoinPrompt();
-        }
-    });
-
-    laterBtn.addEventListener('click', hideJoinPrompt);
-}
-
-
-
 // Function to open video chat window
 function openVideoChatWindow() {
     chrome.runtime.sendMessage({
@@ -548,11 +429,22 @@ function openVideoChatWindow() {
     });
 }
 
-// Detect invite link param and present a 'Join now' prompt (without switching room until accepted)
+// Detect invite link param and automatically join the room
 (function handleInviteLink() {
-    setTimeout(() => {
+    let attempts = 0;
+    const maxAttempts = 10;
+    const interval = 500;
+
+    const tryToJoin = () => {
+        attempts++;
+        if (attempts > maxAttempts) {
+            console.log('[UPE] Could not find invite link after several attempts.');
+            return;
+        }
+
         try {
             const url = new URL(window.location.href);
+            console.log(`[UPE] Attempt ${attempts}: Checking for invite link in URL:`, url.href);
             const fromSearch = url.searchParams.get('upeRoom');
             let fromHash = null;
             let startTime = null;
@@ -564,56 +456,34 @@ function openVideoChatWindow() {
             }
             const inviteRoom = fromSearch || fromHash;
             if (inviteRoom) {
-                pendingInviteRoom = String(inviteRoom);
-                pendingInviteStart = (typeof startTime === 'number' && isFinite(startTime)) ? startTime : null;
-                // Prepare socket so we can join quickly on click, but do not set storage yet
-                initializeSocket();
-                ensureSocket();
-                showJoinNowPrompt(pendingInviteRoom, pendingInviteStart);
+                console.log('[UPE] Found invite link for room:', inviteRoom, 'at time', startTime);
+                roomId = String(inviteRoom);
+                peerId = peerId || Math.random().toString(36).substring(2, 15);
+                partyActive = true;
+                const payload = { roomId, peerId, partyActive };
+                if (typeof startTime === 'number' && isFinite(startTime)) {
+                    pendingStartTime = startTime;
+                    payload.pendingStartTime = startTime;
+                }
+                chrome.storage.local.set(payload, () => {
+                    initializeSocket();
+                    ensureSocket();
+                    joinRoom();
+                    ensureOverlayReady();
+                    attemptAutoStartFromInvite();
+                    setTimeout(() => {
+                        upeAppendMessage({ from: 'system', text: 'Joined party via invite link!', type: 'system' });
+                    }, 500);
+                });
+            } else {
+                setTimeout(tryToJoin, interval);
             }
         } catch (e) {
             console.warn('Failed to parse invite link', e);
         }
-    }, 100);
-})();
+    };
 
-// Re-check invite prompt on SPA route changes (do not switch until accepted)
-function tryShowJoinPromptFromURL() {
-    try {
-        const url = new URL(window.location.href);
-        const fromSearch = url.searchParams.get('upeRoom');
-        let fromHash = null; let startTime = null;
-        if (url.hash) {
-            const hp = new URLSearchParams(url.hash.replace(/^#/, ''));
-            fromHash = hp.get('upeRoom');
-            const st = hp.get('startTime');
-            if (st != null) startTime = parseFloat(st);
-        }
-        const inviteRoom = fromSearch || fromHash;
-        if (!inviteRoom) return;
-        if (joinPromptVisible) return;
-        if (roomId && String(roomId) === String(inviteRoom)) return;
-        pendingInviteRoom = String(inviteRoom);
-        pendingInviteStart = (typeof startTime === 'number' && isFinite(startTime)) ? startTime : null;
-        initializeSocket();
-        ensureSocket();
-        showJoinNowPrompt(pendingInviteRoom, pendingInviteStart);
-    } catch (e) { console.warn('tryShowJoinPromptFromURL failed', e); }
-}
-window.addEventListener('hashchange', tryShowJoinPromptFromURL);
-window.addEventListener('popstate', tryShowJoinPromptFromURL);
-
-
-// Install hooks to detect SPA URL changes (pushState/replaceState)
-(function installURLChangeHooks(){
-    try {
-        const origPush = history.pushState;
-        const origReplace = history.replaceState;
-        history.pushState = function(){ const r = origPush.apply(this, arguments); try { tryShowJoinPromptFromURL(); } catch {} return r; };
-        history.replaceState = function(){ const r = origReplace.apply(this, arguments); try { tryShowJoinPromptFromURL(); } catch {} return r; };
-        // Also attempt once on next tick
-        setTimeout(tryShowJoinPromptFromURL, 0);
-    } catch(e) { console.warn('installURLChangeHooks failed', e); }
+    setTimeout(tryToJoin, 500);
 })();
 
 // Attempt to move from title/details page to player and auto-start
@@ -1307,4 +1177,3 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (changes.peerId) peerId = changes.peerId.newValue;
     // Overlay will appear when playback starts via setupVideoListeners()
 });
-
