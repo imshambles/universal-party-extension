@@ -1,15 +1,123 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Party Extension</title>
+<meta charset="UTF-8">
+<title>Universal Party</title>
+<style>
+  :root{
+    --paper:#F4EDDC; --ink:#111111;
+    --yellow:#FFDE17; --cyan:#34C6F4; --pink:#FF4D9D; --green:#12D98E; --coral:#FF5C5C;
+    --shadow:4px 4px 0 var(--ink);
+    --shadow-sm:3px 3px 0 var(--ink);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; width:340px; background:var(--paper); color:var(--ink);
+    font-family:"Helvetica Neue",Arial,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  .app{padding:16px;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+
+  /* header */
+  .brand{display:flex; align-items:center; gap:12px; margin-bottom:18px;}
+  .logo{
+    width:44px; height:44px; background:var(--yellow); border:2px solid var(--ink); border-radius:8px;
+    display:grid; place-items:center; font-size:22px; box-shadow:var(--shadow-sm);
+  }
+  .brand-name{font-weight:800; font-size:17px; letter-spacing:.5px; text-transform:uppercase; line-height:1;}
+  .brand-tag{font-size:11px; font-weight:600; margin-top:5px;}
+
+  /* labels + inputs */
+  .label{font-size:11px; font-weight:800; letter-spacing:.8px; text-transform:uppercase; margin:0 0 6px;}
+  .input{
+    width:100%; padding:11px 12px; border:2px solid var(--ink); border-radius:8px; background:#fff;
+    font-size:13px; font-weight:600; color:var(--ink); outline:none; transition:box-shadow .05s;
+  }
+  .input::placeholder{color:#8a8578; font-weight:500;}
+  .input:focus{box-shadow:var(--shadow-sm);}
+
+  /* buttons */
+  .btn{
+    width:100%; display:flex; align-items:center; justify-content:center; gap:8px;
+    padding:12px 14px; border:2px solid var(--ink); border-radius:8px; cursor:pointer;
+    font-size:14px; font-weight:800; letter-spacing:.5px; text-transform:uppercase; color:var(--ink);
+    box-shadow:var(--shadow); transition:transform .05s, box-shadow .05s, filter .1s;
+  }
+  .btn:hover{filter:brightness(1.02);}
+  .btn:active{transform:translate(4px,4px); box-shadow:0 0 0 var(--ink);}
+  .btn-icon{font-size:15px; line-height:1;}
+  .btn-primary{background:var(--yellow);}
+  .btn-secondary{background:#fff;}
+  .btn-copy{background:var(--cyan);}
+  .btn-ghost{width:auto; background:#fff; box-shadow:var(--shadow-sm);}
+  .btn-ghost:active{transform:translate(3px,3px); box-shadow:0 0 0 var(--ink);}
+
+  /* active panel */
+  .panel{margin-top:16px; padding:14px; border:2px solid var(--ink); border-radius:10px; background:var(--green); box-shadow:var(--shadow);}
+  .panel-title{display:flex; align-items:center; gap:8px; font-size:12px; font-weight:800; letter-spacing:.6px; text-transform:uppercase; margin-bottom:12px;}
+  .panel-title .dot{width:10px; height:10px; border-radius:50%; background:var(--ink);}
+  .room-row{display:flex; align-items:center; gap:8px; margin-bottom:12px;}
+  .room-tag{font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.6px;}
+  .room-code{
+    flex:1; padding:8px 10px; border:2px solid var(--ink); border-radius:6px; background:#fff;
+    font-size:13px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .hint{font-size:11px; font-weight:600; line-height:1.45; margin:10px 0 0;}
+
+  /* divider */
+  .divider{display:flex; align-items:center; gap:10px; margin:16px 0; font-size:11px; font-weight:800; letter-spacing:1px; text-transform:uppercase;}
+  .divider::before,.divider::after{content:""; flex:1; height:2px; background:var(--ink);}
+
+  /* join */
+  .join-row{display:flex; gap:8px;}
+  .join-row .input{flex:1;}
+
+  /* status */
+  .status{min-height:16px; margin:14px 0 0; font-size:12px; font-weight:700; text-align:center;}
+  .status.ok{color:#0a8f5a;}
+  .status.err{color:#c62828;}
+
+  /* footer */
+  .foot{margin:16px 0 0; padding-top:12px; border-top:2px dashed var(--ink); font-size:10px; font-weight:700; text-align:center; letter-spacing:.4px;}
+  .hidden{display:none;}
+</style>
 </head>
 <body>
-    <button id="startParty">Start Party</button>
-    <p id="roomId"></p>
+  <div class="app">
+    <header class="brand">
+      <div class="logo">🍿</div>
+      <div>
+        <div class="brand-name">Universal Party</div>
+        <div class="brand-tag">Watch anything together, in sync</div>
+      </div>
+    </header>
 
-    <script src="libs/socket.io.min.js"></script>
-    <script src="popup.js"></script>
+    <p class="label">Your name</p>
+    <input id="displayName" class="input" type="text" maxlength="20" placeholder="e.g. Alex" autocomplete="off" style="margin-bottom:14px;" />
+
+    <button id="startParty" class="btn btn-primary"><span class="btn-icon">🎉</span> Start watch party</button>
+
+    <section id="activePanel" class="panel hidden">
+      <div class="panel-title"><span class="dot"></span> Party is live</div>
+      <div class="room-row">
+        <span class="room-tag">Room</span>
+        <code id="roomCode" class="room-code mono">—</code>
+      </div>
+      <button id="copyLink" class="btn btn-copy"><span class="btn-icon">🔗</span> Copy invite link</button>
+      <p class="hint">Send the link to friends — it opens the same video at your exact timestamp and keeps everyone in sync.</p>
+    </section>
+
+    <div class="divider">or join</div>
+
+    <div class="join-row">
+      <input id="joinLink" class="input" type="text" placeholder="Paste invite link…" autocomplete="off" />
+      <button id="joinParty" class="btn btn-ghost">Join</button>
+    </div>
+
+    <p id="status" class="status" role="status"></p>
+
+    <footer class="foot mono">NETFLIX · PRIME · DISNEY+ · HULU · HOTSTAR · YOUTUBE</footer>
+  </div>
+  <script src="popup.js"></script>
 </body>
 </html>

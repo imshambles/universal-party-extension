@@ -98,16 +98,18 @@ io.on('connection', (socket) => {
     const { roomId, peerId } = socket.data || {};
     if (!roomId) return;
     const displayName = payload && payload.displayName ? payload.displayName : peerId;
-    console.log(`[SYNC] play-video from ${displayName} in room ${roomId}`);
-    socket.to(roomId).emit('play-video', { from: peerId, displayName });
+    const time = payload && typeof payload.time === 'number' ? payload.time : undefined;
+    console.log(`[SYNC] play-video from ${displayName} at ${time} in room ${roomId}`);
+    socket.to(roomId).emit('play-video', { from: peerId, displayName, time });
   });
 
   socket.on('pause-video', (payload) => {
     const { roomId, peerId } = socket.data || {};
     if (!roomId) return;
     const displayName = payload && payload.displayName ? payload.displayName : peerId;
-    console.log(`[SYNC] pause-video from ${displayName} in room ${roomId}`);
-    socket.to(roomId).emit('pause-video', { from: peerId, displayName });
+    const time = payload && typeof payload.time === 'number' ? payload.time : undefined;
+    console.log(`[SYNC] pause-video from ${displayName} at ${time} in room ${roomId}`);
+    socket.to(roomId).emit('pause-video', { from: peerId, displayName, time });
   });
 
   socket.on('seek-video', (time, payload) => {

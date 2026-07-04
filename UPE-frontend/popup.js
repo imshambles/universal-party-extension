@@ -1,40 +1,47 @@
-let roomId;
-let peerId;
+// popup.js — Universal Party control panel
+const SUPPORTED = /(^|\.)(netflix|hulu|disneyplus|primevideo|hotstar|youtube)\.com$/i;
 
-function updateRoomDisplay(text) {
-  const el = document.getElementById('roomId');
-  el.textContent = text || (roomId ? `Room ID: ${roomId}` : '');
+let roomId = '';
+let peerId = '';
+
+const $ = (id) => document.getElementById(id);
+const nameInput   = $('displayName');
+const startBtn    = $('startParty');
+const activePanel = $('activePanel');
+const roomCodeEl  = $('roomCode');
+const copyBtn     = $('copyLink');
+const joinInput   = $('joinLink');
+const joinBtn     = $('joinParty');
+const statusEl    = $('status');
+
+const randomId = () => Math.random().toString(36).substring(2, 15);
+
+function setStatus(msg, kind) {
+  statusEl.textContent = msg || '';
+  statusEl.className = 'status' + (kind ? ' ' + kind : '');
 }
 
-// On open, ensure we have IDs and provide a one-click Start Party
-chrome.storage.local.get(['roomId', 'peerId'], (res) => {
-  roomId = res.roomId || '';
-  peerId = res.peerId || '';
-  updateRoomDisplay();
-});
-
-// Start Party: create room, activate party on page, then copy link
-const startBtn = document.getElementById('startParty');
-startBtn.addEventListener('click', async () => {
+// Only pages where the content script runs can actually join a party.
+function isSupported(u) {
   try {
-    // Create room/peer IDs
-    roomId = Math.random().toString(36).substring(2, 15);
-    peerId = Math.random().toString(36).substring(2, 15);
+    const url = new URL(u);
+    if (url.protocol === 'file:') return true;
+    if (url.hostname === 'localhost') return true;
+    return SUPPORTED.test(url.hostname);
+  } catch { return false; }
+}
 
-    console.log('[POPUP] Generated room/peer IDs:', { roomId, peerId });
+async function getActiveTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab;
+}
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !tab.id || !tab.url) { updateRoomDisplay('Open a supported streaming page'); return; }
-
-    // Mark party active and set IDs in the page context
-    await chrome.storage.local.set({ roomId, peerId, partyActive: true });
-    console.log('[POPUP] Party started with roomId:', roomId, 'peerId:', peerId);
-
-    // Ask the page to start party now (join + overlay) and return timestamp
+// Read the primary video's current time/duration from the page.
+async function readVideoTime(tabId) {
+  try {
     const [exec] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: { tabId },
       func: () => {
-        // Read currentTime and set pending start in storage for content script
         const vids = Array.from(document.querySelectorAll('video'));
         let time = null, duration = null;
         if (vids.length) {
@@ -49,26 +56,103 @@ startBtn.addEventListener('click', async () => {
         return { time, duration };
       },
     });
-    const time = exec?.result?.time;
-    const duration = exec?.result?.duration;
+    return (exec && exec.result) || { time: null, duration: null };
+  } catch {
+    return { time: null, duration: null };
+  }
+}
 
-    // Build invite URL with room and timestamp
-    const url = new URL(tab.url);
-    const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
-    hashParams.set('upeRoom', roomId);
-    if (typeof time === 'number' && time > 0.25) {
-      const clamped = (typeof duration === 'number' && isFinite(duration)) ? Math.min(time, Math.max(0, duration - 0.25)) : time;
-      hashParams.set('startTime', String(clamped.toFixed(3)));
+function buildInviteUrl(tabUrl, room, time, duration) {
+  const url = new URL(tabUrl);
+  const hp = new URLSearchParams(url.hash.replace(/^#/, ''));
+  hp.set('upeRoom', room);
+  if (typeof time === 'number' && time > 0.25) {
+    const clamped = (typeof duration === 'number' && isFinite(duration))
+      ? Math.min(time, Math.max(0, duration - 0.25)) : time;
+    hp.set('startTime', String(clamped.toFixed(3)));
+  }
+  url.hash = hp.toString();
+  return url.toString();
+}
+
+function showActive(id) {
+  roomId = id;
+  roomCodeEl.textContent = id;
+  activePanel.classList.remove('hidden');
+  startBtn.innerHTML = '<span class="btn-icon">🔄</span> Start a new party';
+  startBtn.classList.remove('btn-primary');
+  startBtn.classList.add('btn-secondary');
+}
+
+// Build the invite link for the current tab (with a fresh timestamp) and copy it.
+async function copyInvite(showMsg) {
+  const tab = await getActiveTab();
+  if (!tab || !tab.url || !roomId) return false;
+  const { time, duration } = await readVideoTime(tab.id);
+  const link = buildInviteUrl(tab.url, roomId, time, duration);
+  try {
+    await navigator.clipboard.writeText(link);
+    if (showMsg) setStatus('Invite link copied to clipboard!', 'ok');
+    return true;
+  } catch {
+    if (showMsg) setStatus('Could not copy — check clipboard permissions.', 'err');
+    return false;
+  }
+}
+
+// ---- init ----
+chrome.storage.local.get(['roomId', 'peerId', 'partyActive', 'displayName'], (res) => {
+  roomId = res.roomId || '';
+  peerId = res.peerId || '';
+  if (res.displayName) nameInput.value = res.displayName;
+  if (res.partyActive && roomId) showActive(roomId);
+});
+
+// Persist the name as soon as it's edited, so it applies even without starting.
+nameInput.addEventListener('change', () => {
+  chrome.storage.local.set({ displayName: nameInput.value.trim() });
+});
+
+// ---- start ----
+startBtn.addEventListener('click', async () => {
+  try {
+    const tab = await getActiveTab();
+    if (!tab || !tab.id || !tab.url || !isSupported(tab.url)) {
+      setStatus('Open a supported streaming page first, then start.', 'err');
+      return;
     }
-    url.hash = hashParams.toString();
-
-    console.log('[POPUP] Generated invite URL:', url.toString());
-    console.log('[POPUP] Hash params:', hashParams.toString());
-
-    await navigator.clipboard.writeText(url.toString());
-    updateRoomDisplay(`Party started! Link copied.`);
+    const name = nameInput.value.trim();
+    roomId = randomId();
+    peerId = randomId();
+    await chrome.storage.local.set({ roomId, peerId, partyActive: true, displayName: name });
+    showActive(roomId);
+    const copied = await copyInvite(false);
+    setStatus(copied ? 'Party started — invite link copied! 🎉' : 'Party started! Use “Copy invite link”.', 'ok');
   } catch (e) {
-    console.error('Start Party failed', e);
-    updateRoomDisplay('Failed to start party');
+    console.error('Start party failed', e);
+    setStatus('Something went wrong starting the party.', 'err');
   }
 });
+
+// ---- copy ----
+copyBtn.addEventListener('click', () => copyInvite(true));
+
+// ---- join ----
+joinBtn.addEventListener('click', async () => {
+  const raw = joinInput.value.trim();
+  if (!raw) { setStatus('Paste an invite link to join.', 'err'); return; }
+  let target;
+  try { target = new URL(raw); } catch { setStatus('That doesn’t look like a valid link.', 'err'); return; }
+  const hp = new URLSearchParams(target.hash.replace(/^#/, ''));
+  const room = target.searchParams.get('upeRoom') || hp.get('upeRoom');
+  if (!room) { setStatus('This link has no party room in it.', 'err'); return; }
+  const name = nameInput.value.trim();
+  if (name) await chrome.storage.local.set({ displayName: name });
+  const tab = await getActiveTab();
+  if (!tab || !tab.id) { setStatus('No active tab to open the link in.', 'err'); return; }
+  setStatus('Joining party…', 'ok');
+  await chrome.tabs.update(tab.id, { url: raw });
+  window.close();
+});
+
+joinInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') joinBtn.click(); });

@@ -8,8 +8,31 @@ let peerId;
 let displayName = '';
 let initialized = false;
 let listenersSetup = false;
-let suppressEvents = false;
 let currentVideo = null;
+
+// Echo suppression for remotely-applied actions.
+// When we apply a peer's play/pause/seek, the browser fires the matching
+// play/pause/seeked event locally. We must NOT re-broadcast that echo, or the
+// two sides ping-pong and "fight" over control. We arm a per-action flag that
+// the local handler consumes when the echo fires. Key differences from a fixed
+// setTimeout window: (1) it's per action type so overlapping events don't
+// clobber each other, and (2) the window is generous, because streaming sites
+// routinely delay these events past a few hundred ms while buffering. We only
+// arm when the action will actually change state, so a missing echo can't wedge
+// the flag and swallow a real local action later.
+const echoUntil = { play: 0, pause: 0, seek: 0 };
+const ECHO_WINDOW_MS = 2000;
+// On a synced play/pause a peer re-aligns its playhead to the sender's position
+// only when it's more than this far off, so everyone resumes/lands on the same
+// spot without pointless micro-seeks (which cause a visible stutter) when
+// they're already within human-imperceptible tolerance.
+const SEEK_SYNC_THRESHOLD = 0.5; // seconds
+function armEcho(kind) { echoUntil[kind] = Date.now() + ECHO_WINDOW_MS; }
+function consumeEcho(kind) {
+    const armed = echoUntil[kind] && Date.now() <= echoUntil[kind];
+    echoUntil[kind] = 0;
+    return armed;
+}
 
 let overlayActive = false; // whether sidebar overlay is shown
 let cleanupVideoHandlers = null; // to detach listeners from previous video
@@ -23,7 +46,7 @@ let lastControlJoinSig = null;
 
 // Socket connect guard and pending sync queue
 let isConnecting = false;
-const pendingSync = { play: false, pause: false, seekTime: null };
+const pendingSync = { play: false, pause: false, seekTime: null, playTime: null, pauseTime: null };
 
 function flushPendingSync() {
     try {
@@ -34,14 +57,16 @@ function flushPendingSync() {
         }
         // Last control state wins: prefer play over pause
         if (pendingSync.play) {
-            socket.emit('play-video', { displayName: displayName || 'You' });
+            socket.emit('play-video', { displayName: displayName || 'You', time: pendingSync.playTime });
         } else if (pendingSync.pause) {
-            socket.emit('pause-video', { displayName: displayName || 'You' });
+            socket.emit('pause-video', { displayName: displayName || 'You', time: pendingSync.pauseTime });
         }
     } finally {
         pendingSync.play = false;
         pendingSync.pause = false;
         pendingSync.seekTime = null;
+        pendingSync.playTime = null;
+        pendingSync.pauseTime = null;
     }
 }
 
@@ -62,8 +87,10 @@ function queueSyncAndConnect(kind, time) {
         pendingSync.seekTime = time;
     } else if (kind === 'play') {
         pendingSync.play = true; pendingSync.pause = false; // last wins
+        if (typeof time === 'number') pendingSync.playTime = time;
     } else if (kind === 'pause') {
         pendingSync.pause = true; pendingSync.play = false;
+        if (typeof time === 'number') pendingSync.pauseTime = time;
     }
     ensureConnected();
 }
@@ -86,6 +113,7 @@ function ensureSocket() {
 
         socket.on('connect', () => {
             console.log('Connected to Socket.IO server');
+            try { upeSetStatusDot('connected'); } catch {}
             // Auto-join room if we have room and peer IDs
             if (roomId && peerId) {
                 console.log('Auto-joining room on connect:', roomId, peerId);
@@ -103,10 +131,12 @@ function ensureSocket() {
 
         socket.on('disconnect', (reason) => {
             console.log('Socket disconnected:', reason);
+            try { upeSetStatusDot('disconnected'); } catch {}
         });
 
         socket.on('reconnect', (attemptNumber) => {
             console.log('Socket reconnected after', attemptNumber, 'attempts');
+            try { upeSetStatusDot('connected'); } catch {}
             if (roomId && peerId) {
                 console.log('Re-joining room after reconnect:', roomId, peerId);
                 joinRoom();
@@ -121,9 +151,15 @@ function ensureSocket() {
             const video = getActiveVideo();
             console.log('[SYNC] Received play-video', data);
             if (video) {
-                suppressEvents = true;
+                // Re-align to the sender's playhead so playback resumes from the
+                // same spot for everyone, then play.
+                if (data && typeof data.time === 'number' &&
+                    Math.abs((video.currentTime || 0) - data.time) > SEEK_SYNC_THRESHOLD) {
+                    armEcho('seek');
+                    try { video.currentTime = data.time; } catch {}
+                }
+                if (video.paused) armEcho('play'); // a 'play' event will echo back
                 video.play().catch(() => {});
-                setTimeout(() => { suppressEvents = false; }, 250);
             }
             // Show system message
             if (data && data.displayName) {
@@ -138,9 +174,14 @@ function ensureSocket() {
             const video = getActiveVideo();
             console.log('[SYNC] Received pause-video', data);
             if (video) {
-                suppressEvents = true;
+                if (!video.paused) armEcho('pause'); // a 'pause' event will echo back
                 video.pause();
-                setTimeout(() => { suppressEvents = false; }, 250);
+                // Land on the exact position the sender paused at.
+                if (data && typeof data.time === 'number' &&
+                    Math.abs((video.currentTime || 0) - data.time) > SEEK_SYNC_THRESHOLD) {
+                    armEcho('seek');
+                    try { video.currentTime = data.time; } catch {}
+                }
             }
             // Show system message
             if (data && data.displayName) {
@@ -155,9 +196,11 @@ function ensureSocket() {
             const video = getActiveVideo();
             console.log('[SYNC] Received seek-video', time, data);
             if (video && typeof time === 'number') {
-                suppressEvents = true;
+                // Only arm if this actually moves the playhead; otherwise no
+                // 'seeked' event fires and the flag would linger and swallow a
+                // later real seek.
+                if (Math.abs((video.currentTime || 0) - time) > 0.4) armEcho('seek');
                 try { video.currentTime = time; } catch {}
-                setTimeout(() => { suppressEvents = false; }, 250);
             }
             // Show system message with formatted time
             if (data && data.displayName) {
@@ -305,7 +348,7 @@ function setupVideoListeners() {
         if (typeof pendingStartTime === 'number' && isFinite(pendingStartTime)) {
             const t = Math.max(0, pendingStartTime);
             console.log('[INVITE] Applying start time:', t);
-            suppressEvents = true;
+            armEcho('seek'); armEcho('play'); // don't rebroadcast the invite-driven seek/play
             try {
                 if (isFinite(video.duration)) {
                     video.currentTime = Math.min(t, Math.max(0, video.duration - 0.25));
@@ -314,7 +357,6 @@ function setupVideoListeners() {
                 }
                 video.play().catch(() => {});
             } catch {}
-            setTimeout(() => { suppressEvents = false; }, 300);
             pendingStartTime = null;
         }
     };
@@ -325,27 +367,27 @@ function setupVideoListeners() {
             if (!overlayActive) ensureOverlayReady();
             ensureRoomAndOverlay();
         }
-        if (suppressEvents) return;
+        if (consumeEcho('play')) return; // echo of a peer's play; don't rebroadcast
         console.log('[SYNC] Emitting play-video');
         if (socket && socket.connected) {
-            socket.emit('play-video', { displayName: displayName || 'You' });
+            socket.emit('play-video', { displayName: displayName || 'You', time: video.currentTime });
         } else {
             // queue and connect instead of failing
-            queueSyncAndConnect('play');
+            queueSyncAndConnect('play', video.currentTime);
         }
     };
     const onPause = () => {
-        if (suppressEvents) return;
+        if (consumeEcho('pause')) return; // echo of a peer's pause; don't rebroadcast
         console.log('[SYNC] Emitting pause-video');
         if (socket && socket.connected) {
-            socket.emit('pause-video', { displayName: displayName || 'You' });
+            socket.emit('pause-video', { displayName: displayName || 'You', time: video.currentTime });
         } else {
             // queue and connect instead of failing
-            queueSyncAndConnect('pause');
+            queueSyncAndConnect('pause', video.currentTime);
         }
     };
     const onSeeked = () => {
-        if (suppressEvents) return;
+        if (consumeEcho('seek')) return; // echo of a peer's seek; don't rebroadcast
         console.log('[SYNC] Emitting seek-video', video.currentTime);
         if (socket && socket.connected) {
             socket.emit('seek-video', video.currentTime, { displayName: displayName || 'You' });
@@ -540,7 +582,7 @@ function attemptAutoStartFromInvite() {
         setupVideoListeners();
         const v = currentVideo || findPrimaryVideo();
         if (v && typeof pendingStartTime === 'number' && isFinite(pendingStartTime)) {
-            suppressEvents = true;
+            armEcho('seek'); armEcho('play'); // don't rebroadcast the invite-driven seek/play
             try {
                 // temporarily mute to help bypass autoplay restrictions
                 const prevMuted = v.muted;
@@ -554,7 +596,6 @@ function attemptAutoStartFromInvite() {
                 // unmute after a short delay
                 setTimeout(() => { v.muted = prevMuted; }, 800);
             } catch {}
-            setTimeout(() => { suppressEvents = false; }, 350);
             pendingStartTime = null;
         }
     };
@@ -667,8 +708,24 @@ window.UPE = {
 
 // Observe DOM changes to attach listeners when video appears
 try {
+    let lastVideoCheck = 0;
     const observer = new MutationObserver(() => {
-        if (!listenersSetup) setupVideoListeners();
+        // This fires very frequently on streaming SPAs, so throttle the work.
+        const now = Date.now();
+        if (now - lastVideoCheck < 1000) return;
+        lastVideoCheck = now;
+
+        if (!listenersSetup) { setupVideoListeners(); return; }
+
+        // Re-attach if the site swapped out the <video> we were tracking
+        // (SPA navigation to the next episode/title, quality switch, ad breaks).
+        // Otherwise our listeners sit on a detached element and sync silently
+        // stops working until a full page reload.
+        const primary = findPrimaryVideo();
+        if (currentVideo && (!currentVideo.isConnected || (primary && primary !== currentVideo))) {
+            console.log('[UPE] Primary video changed; re-attaching sync listeners');
+            setupVideoListeners();
+        }
     });
     observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
 } catch (e) {
@@ -687,40 +744,48 @@ function ensureSidebar() {
     sidebar.id = 'upe-sidebar';
     sidebar.innerHTML = `
       <header>
-        <div class="title">Universal Party – Room <span id="upe-room-label"></span></div>
+        <div class="title">
+          <span class="brand-dot" id="upe-status-dot" title="Connecting…"></span>
+          <span>Watch Party</span>
+          <span class="room-badge" id="upe-room-label"></span>
+        </div>
         <div class="controls">
-          <button id="upe-copy-link">Copy Link</button>
-          <button id="upe-minimize">_</button>
-          <button id="upe-close">×</button>
+          <button id="upe-copy-link" title="Copy invite link">🔗 Invite</button>
+          <button id="upe-minimize" title="Minimize">–</button>
+          <button id="upe-close" title="Close">×</button>
         </div>
       </header>
       <div class="user-info">
-        <input id="upe-display-name" placeholder="Enter your name..." maxlength="20" />
-        <button id="upe-set-name">Set Name</button>
+        <input id="upe-display-name" placeholder="Your name…" maxlength="20" />
+        <button id="upe-set-name">Save</button>
       </div>
       <div class="videos">
         <video id="upe-local" autoplay muted playsinline></video>
         <div id="upe-remote-container"></div>
+        <div class="waiting">Waiting for friends to join…<br><span>Share the invite link 🔗</span></div>
       </div>
       <div class="video-controls">
-        <button id="upe-mute-audio" class="control-btn" title="Mute Audio">
+        <button id="upe-mute-audio" class="control-btn" title="Mute microphone">
           <span class="icon">🔊</span>
           <span class="text">Mute</span>
         </button>
-        <button id="upe-mute-video" class="control-btn" title="Mute Video">
+        <button id="upe-mute-video" class="control-btn" title="Turn off camera">
           <span class="icon">📹</span>
-          <span class="text">Video</span>
+          <span class="text">Camera</span>
         </button>
       </div>
       <div class="chat">
         <div id="upe-messages" class="messages"></div>
         <div class="compose">
-          <input id="upe-input" placeholder="Type a message..." />
+          <input id="upe-input" placeholder="Type a message…" />
           <button id="upe-send">Send</button>
         </div>
       </div>
     `;
     document.body.appendChild(sidebar);
+
+    // Seed the connection dot with the current socket state.
+    upeSetStatusDot(socket && socket.connected ? 'connected' : 'connecting');
 
     document.getElementById('upe-copy-link').addEventListener('click', copyInviteLink);
     document.getElementById('upe-minimize').addEventListener('click', () => {
@@ -810,6 +875,16 @@ function getDisplayName(userId, msgDisplayName) {
     return userId || 'Unknown';
 }
 
+// Reflect the live socket connection state in the sidebar header dot.
+function upeSetStatusDot(state) {
+    const dot = document.getElementById('upe-status-dot');
+    if (!dot) return;
+    dot.classList.remove('connected', 'disconnected');
+    if (state === 'connected') { dot.classList.add('connected'); dot.title = 'Connected'; }
+    else if (state === 'disconnected') { dot.classList.add('disconnected'); dot.title = 'Disconnected — reconnecting…'; }
+    else { dot.title = 'Connecting…'; }
+}
+
 // Simple chat helpers
 function upeAppendMessage(msg) {
     try {
@@ -828,6 +903,7 @@ function upeAppendMessage(msg) {
             div.appendChild(text);
         } else {
             div.className = 'msg';
+            if (msg.from === 'me' || (peerId && msg.from === peerId)) div.classList.add('me');
             const from = document.createElement('span');
             from.className = 'from';
             from.textContent = getDisplayName(msg.from, msg.displayName) + ':';
