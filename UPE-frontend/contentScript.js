@@ -6,6 +6,13 @@ let socket;
 let roomId;
 let peerId;
 let displayName = '';
+// Stable fallback shown to OTHER people when this user hasn't set a name, so
+// peers see e.g. "Guest-a3f9 paused" instead of everyone appearing as "You".
+let guestName = 'Guest-' + Math.random().toString(36).slice(2, 6);
+function outgoingName() {
+    const n = (displayName || '').trim();
+    return n || guestName;
+}
 let initialized = false;
 let listenersSetup = false;
 let currentVideo = null;
@@ -53,13 +60,13 @@ function flushPendingSync() {
         if (!socket || !socket.connected) return;
         // Apply seek first if any
         if (typeof pendingSync.seekTime === 'number') {
-            socket.emit('seek-video', pendingSync.seekTime, { displayName: displayName || 'You' });
+            socket.emit('seek-video', pendingSync.seekTime, { displayName: outgoingName() });
         }
         // Last control state wins: prefer play over pause
         if (pendingSync.play) {
-            socket.emit('play-video', { displayName: displayName || 'You', time: pendingSync.playTime });
+            socket.emit('play-video', { displayName: outgoingName(), time: pendingSync.playTime });
         } else if (pendingSync.pause) {
-            socket.emit('pause-video', { displayName: displayName || 'You', time: pendingSync.pauseTime });
+            socket.emit('pause-video', { displayName: outgoingName(), time: pendingSync.pauseTime });
         }
     } finally {
         pendingSync.play = false;
@@ -240,6 +247,7 @@ function initializeSocket() {
 // Ensure the server has us registered as a real peer if PeerJS is ready
 function ensurePeerRegisteredWithServer() {
     try {
+        if (!partyActive) return;
         if (!socket) return;
         if (!roomId) return;
         const id = upePeerOpenId || (upePeer && upePeer.id);
@@ -275,7 +283,7 @@ function ensurePeerRegisteredWithServer() {
 
 // Function to join or create a room (deduped)
 function joinRoom() {
-    if (roomId && peerId && socket && socket.connected) {
+    if (partyActive && roomId && peerId && socket && socket.connected) {
         const controlSig = `${roomId}|${peerId}|${socket && socket.id}|CONTROL`;
         if (lastControlJoinSig === controlSig) {
             return;
@@ -362,7 +370,8 @@ function setupVideoListeners() {
     };
 
     const onPlay = () => {
-        // Always activate room/overlay when we have roomId and peerId
+        if (!partyActive) return; // not in a party — don't activate, sync, or reconnect
+        // Activate room/overlay when we have roomId and peerId
         if (roomId && peerId) {
             if (!overlayActive) ensureOverlayReady();
             ensureRoomAndOverlay();
@@ -370,27 +379,29 @@ function setupVideoListeners() {
         if (consumeEcho('play')) return; // echo of a peer's play; don't rebroadcast
         console.log('[SYNC] Emitting play-video');
         if (socket && socket.connected) {
-            socket.emit('play-video', { displayName: displayName || 'You', time: video.currentTime });
+            socket.emit('play-video', { displayName: outgoingName(), time: video.currentTime });
         } else {
             // queue and connect instead of failing
             queueSyncAndConnect('play', video.currentTime);
         }
     };
     const onPause = () => {
+        if (!partyActive) return; // not in a party — don't sync
         if (consumeEcho('pause')) return; // echo of a peer's pause; don't rebroadcast
         console.log('[SYNC] Emitting pause-video');
         if (socket && socket.connected) {
-            socket.emit('pause-video', { displayName: displayName || 'You', time: video.currentTime });
+            socket.emit('pause-video', { displayName: outgoingName(), time: video.currentTime });
         } else {
             // queue and connect instead of failing
             queueSyncAndConnect('pause', video.currentTime);
         }
     };
     const onSeeked = () => {
+        if (!partyActive) return; // not in a party — don't sync
         if (consumeEcho('seek')) return; // echo of a peer's seek; don't rebroadcast
         console.log('[SYNC] Emitting seek-video', video.currentTime);
         if (socket && socket.connected) {
-            socket.emit('seek-video', video.currentTime, { displayName: displayName || 'You' });
+            socket.emit('seek-video', video.currentTime, { displayName: outgoingName() });
         } else {
             // queue and connect instead of failing
             queueSyncAndConnect('seek', video.currentTime);
@@ -425,7 +436,7 @@ function setupVideoListeners() {
         listenersSetup = false;
     };
 
-    if (!overlayActive && (video.currentTime > 0 || !video.paused)) {
+    if (partyActive && !overlayActive && (video.currentTime > 0 || !video.paused)) {
         ensureOverlayReady();
     }
 }
@@ -437,6 +448,32 @@ function teardownOverlay() {
         if (sidebar) sidebar.remove();
     } catch {}
     overlayActive = false;
+}
+
+// Fully leave the party: tear down media + connections so the server and the
+// other participants see us go, and a later rejoin starts from a clean slate.
+// (Closing the sidebar used to only remove the DOM, leaving us joined as a
+// ghost — which is how a rejoin produced two of you in the room.)
+function leaveParty() {
+    partyActive = false;
+    // Close every peer call and remove its video tile.
+    Object.keys(upePeers).forEach((uid) => upeRemoveRemote(uid));
+    // Destroy our PeerJS peer so remote sides get a 'close' and drop our tile.
+    try { if (upePeer) upePeer.destroy(); } catch {}
+    upePeer = null;
+    upePeerOpenId = null;
+    // Stop the camera/mic so the light goes off and tracks are released.
+    try { if (upeLocalStream) upeLocalStream.getTracks().forEach((t) => t.stop()); } catch {}
+    upeLocalStream = null;
+    // Disconnect the socket so the server removes us from the room.
+    try { if (socket) socket.disconnect(); } catch {}
+    // Reset join/announce dedup so a fresh join re-registers cleanly.
+    lastControlJoinSig = null;
+    lastPeerJoinSig = null;
+    hasAnnouncedJoin = false;
+    // Remember we left, so playback doesn't silently re-join this room.
+    try { chrome.storage.local.set({ partyActive: false }); } catch {}
+    teardownOverlay();
 }
 
 // Ensure we are connected to the room and overlay UI is shown
@@ -454,21 +491,6 @@ function ensureRoomAndOverlay() {
     }
     joinRoom();
     ensureOverlayReady();
-}
-
-// Function to open video chat window
-function openVideoChatWindow() {
-    chrome.runtime.sendMessage({
-        type: 'video-chat',
-        roomId: roomId,
-        peerId: peerId
-    }, (response) => {
-        if (chrome.runtime.lastError) {
-            console.error('Error opening video chat:', chrome.runtime.lastError);
-        } else {
-            console.log('Video chat window opened');
-        }
-    });
 }
 
 // Detect invite link param and automatically join the room
@@ -681,20 +703,16 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (changes.pendingStartTime) pendingStartTime = changes.pendingStartTime.newValue;
     if (changes.displayName) displayName = changes.displayName.newValue || '';
 
-    // Do not join until user starts party or invite has a timestamp; on play we activate
     initializeSocket();
     ensureSocket();
-});
 
-// Add a button to open video chat
-const chatButton = document.createElement('button');
-chatButton.textContent = 'Open Video Chat';
-chatButton.style.position = 'fixed';
-chatButton.style.top = '10px';
-chatButton.style.right = '10px';
-chatButton.style.zIndex = '9999';
-chatButton.addEventListener('click', openVideoChatWindow);
-document.body.appendChild(chatButton);
+    // When the party becomes active (host clicked "Start", or we joined), show
+    // the sidebar and join right away instead of waiting for a play event —
+    // otherwise starting while the video is paused looks like nothing happened.
+    if (partyActive && roomId && peerId) {
+        ensureRoomAndOverlay();
+    }
+});
 
 // Add debug functions to window for console access
 window.UPE = {
@@ -792,7 +810,7 @@ function ensureSidebar() {
         sidebar.classList.toggle('minimized');
     });
     document.getElementById('upe-close').addEventListener('click', () => {
-        sidebar.remove();
+        leaveParty();
     });
 
     // Add mute controls
@@ -933,7 +951,7 @@ function setupChat() {
             if (!text) return;
             const payload = {
                 text,
-                displayName: displayName || 'You'
+                displayName: outgoingName()
             };
             socket.emit('chat-message', payload);
             upeAppendMessage({ from: 'me', text });
@@ -974,12 +992,12 @@ function ensurePeer() {
                 if (uid && uid !== id) upeConnectTo(uid);
             });
             socket.on('peer-disconnected', (uid) => {
-                if (upePeers[uid]) { try { upePeers[uid].close(); } catch {} delete upePeers[uid]; }
+                upeRemoveRemote(uid);
             });
         }
         // Join the same room with peer id so backend recognizes as peer participant
         const doPeerJoin = () => {
-            if (socket && roomId) {
+            if (socket && roomId && partyActive) {
                 console.log('[UPE] Emitting join-room as PEER', { roomId, id });
                 socket.emit('join-room', String(roomId), id);
                 upePeerOpenId = id;
@@ -1036,9 +1054,7 @@ function answerCall(call) {
     call.on('stream', (s) => upeAttachRemote(s, call.peer));
     call.on('close', () => {
         console.log('[UPE] call closed', call.peer);
-        if (upePeers[call.peer]) {
-            delete upePeers[call.peer];
-        }
+        upeRemoveRemote(call.peer);
     });
     upePeers[call.peer] = call;
 }
@@ -1133,7 +1149,25 @@ function updateMuteButtonStates() {
     }
 }
 
+// Close a peer's call and remove its video tile from the sidebar. The old code
+// only deleted the map entry, so a departed peer left a frozen/black <video>.
+function upeRemoveRemote(uid) {
+    const c = upePeers[uid];
+    if (c && typeof c.close === 'function') { try { c.close(); } catch {} }
+    delete upePeers[uid];
+    const container = document.getElementById('upe-remote-container');
+    if (container && uid) {
+        const v = container.querySelector('video[data-uid="' + uid + '"]');
+        if (v) { try { v.srcObject = null; } catch {} v.remove(); }
+    }
+}
+
 function upeConnectTo(uid) {
+    if (!uid) return;
+    const selfId = upePeerOpenId || (upePeer && upePeer.id);
+    if (uid === selfId) return;   // never call ourselves
+    if (upePeers[uid]) return;    // already connected/connecting to this peer
+    upePeers[uid] = 'pending';    // reserve synchronously so racing events don't double-call
     console.log('[UPE] Connecting to user:', uid);
     ensureLocalStream().then((stream) => {
         console.log('[UPE] Local stream ready, calling user:', uid);
@@ -1144,15 +1178,14 @@ function upeConnectTo(uid) {
         });
         call.on('close', () => {
             console.log('[UPE] outbound call closed', uid);
-            if (upePeers[uid]) {
-                delete upePeers[uid];
-            }
+            upeRemoveRemote(uid);
         });
         call.on('error', (error) => {
             console.error('[UPE] Call error with', uid, ':', error);
         });
         upePeers[uid] = call;
     }).catch((error) => {
+        delete upePeers[uid];
         console.error('[UPE] Failed to connect to', uid, ':', error);
     });
 }
@@ -1171,62 +1204,98 @@ function upeAttachRemote(stream, uid) {
     v.srcObject = stream;
     v.addEventListener('loadedmetadata', () => v.play());
 }
-// Toggle audio mute
-function toggleAudioMute() {
-    if (!upeLocalStream) return;
+// --- Camera / mic controls -------------------------------------------------
+// Turning a device off fully STOPS its track (releasing the camera light and
+// the mic), instead of just setting track.enabled = false — which keeps the
+// hardware live and the OS indicator lit. Turning back on re-acquires the
+// device and swaps the fresh track onto every active call.
 
-    const audioTracks = upeLocalStream.getAudioTracks();
-    if (audioTracks.length > 0) {
-        const isMuted = audioTracks[0].enabled;
-        audioTracks[0].enabled = !isMuted;
-
-        const btn = document.getElementById('upe-mute-audio');
-        const icon = btn.querySelector('.icon');
-        const text = btn.querySelector('.text');
-
-        if (isMuted) {
-            icon.textContent = '🔇';
-            text.textContent = 'Unmute';
-            btn.title = 'Unmute Audio';
-            btn.classList.add('muted');
-        } else {
-            icon.textContent = '🔊';
-            text.textContent = 'Mute';
-            btn.title = 'Mute Audio';
-            btn.classList.remove('muted');
-        }
-
-        console.log('Audio', isMuted ? 'muted' : 'unmuted');
-    }
+function upeHasLiveTrack(kind) {
+    if (!upeLocalStream) return false;
+    const tracks = kind === 'video' ? upeLocalStream.getVideoTracks() : upeLocalStream.getAudioTracks();
+    return tracks.length > 0 && tracks[0].readyState === 'live';
 }
 
-// Toggle video mute
-function toggleVideoMute() {
+// Swap the outgoing track of `kind` on every peer connection. Senders are
+// tagged so they can be found again after replaceTrack(null) clears s.track.
+function upeReplaceOutgoingTrack(kind, track) {
+    Object.values(upePeers).forEach((call) => {
+        try {
+            const pc = call && call.peerConnection;
+            if (!pc || typeof pc.getSenders !== 'function') return;
+            const sender = pc.getSenders().find((s) => s._upeKind === kind)
+                        || pc.getSenders().find((s) => s.track && s.track.kind === kind);
+            if (sender) {
+                sender._upeKind = kind;
+                const p = sender.replaceTrack(track);
+                if (p && p.catch) p.catch(() => {});
+            }
+        } catch (e) { console.warn('[UPE] replaceTrack failed', e); }
+    });
+}
+
+function upeStopLocalTrack(kind) {
     if (!upeLocalStream) return;
+    upeReplaceOutgoingTrack(kind, null);
+    const tracks = kind === 'video' ? upeLocalStream.getVideoTracks() : upeLocalStream.getAudioTracks();
+    tracks.forEach((t) => { try { t.stop(); } catch {} try { upeLocalStream.removeTrack(t); } catch {} });
+    const lv = document.getElementById('upe-local');
+    if (lv) lv.srcObject = upeLocalStream;
+}
 
-    const videoTracks = upeLocalStream.getVideoTracks();
-    if (videoTracks.length > 0) {
-        const isMuted = videoTracks[0].enabled;
-        videoTracks[0].enabled = !isMuted;
+async function upeStartLocalTrack(kind) {
+    const constraints = kind === 'video' ? { video: true } : { audio: true };
+    const s = await navigator.mediaDevices.getUserMedia(constraints);
+    const track = kind === 'video' ? s.getVideoTracks()[0] : s.getAudioTracks()[0];
+    if (!track) return;
+    if (!upeLocalStream) upeLocalStream = new MediaStream();
+    // clear any stale track of this kind first
+    (kind === 'video' ? upeLocalStream.getVideoTracks() : upeLocalStream.getAudioTracks())
+        .forEach((t) => { try { t.stop(); } catch {} try { upeLocalStream.removeTrack(t); } catch {} });
+    upeLocalStream.addTrack(track);
+    upeReplaceOutgoingTrack(kind, track);
+    const lv = document.getElementById('upe-local');
+    if (lv) { lv.srcObject = upeLocalStream; lv.muted = true; }
+}
 
-        const btn = document.getElementById('upe-mute-video');
-        const icon = btn.querySelector('.icon');
-        const text = btn.querySelector('.text');
+function setAudioBtnMuted(muted) {
+    const btn = document.getElementById('upe-mute-audio');
+    if (!btn) return;
+    const icon = btn.querySelector('.icon');
+    const text = btn.querySelector('.text');
+    if (icon) icon.textContent = muted ? '🔇' : '🔊';
+    if (text) text.textContent = muted ? 'Unmute' : 'Mute';
+    btn.title = muted ? 'Turn on microphone' : 'Mute microphone';
+    btn.classList.toggle('muted', muted);
+}
 
-        if (isMuted) {
-            icon.textContent = '🚫';
-            text.textContent = 'Show';
-            btn.title = 'Show Video';
-            btn.classList.add('muted');
-        } else {
-            icon.textContent = '📹';
-            text.textContent = 'Video';
-            btn.title = 'Mute Video';
-            btn.classList.remove('muted');
-        }
+function setVideoBtnMuted(muted) {
+    const btn = document.getElementById('upe-mute-video');
+    if (!btn) return;
+    const icon = btn.querySelector('.icon');
+    const text = btn.querySelector('.text');
+    if (icon) icon.textContent = muted ? '🚫' : '📹';
+    if (text) text.textContent = muted ? 'Show' : 'Camera';
+    btn.title = muted ? 'Turn on camera' : 'Turn off camera';
+    btn.classList.toggle('muted', muted);
+}
 
-        console.log('Video', isMuted ? 'muted' : 'unmuted');
-    }
+async function toggleAudioMute() {
+    const wasOn = upeHasLiveTrack('audio');
+    try {
+        if (wasOn) upeStopLocalTrack('audio'); else await upeStartLocalTrack('audio');
+    } catch (e) { console.error('[UPE] mic toggle failed', e); return; }
+    setAudioBtnMuted(!upeHasLiveTrack('audio'));
+    console.log('Audio', wasOn ? 'muted (mic released)' : 'unmuted');
+}
+
+async function toggleVideoMute() {
+    const wasOn = upeHasLiveTrack('video');
+    try {
+        if (wasOn) upeStopLocalTrack('video'); else await upeStartLocalTrack('video');
+    } catch (e) { console.error('[UPE] camera toggle failed', e); return; }
+    setVideoBtnMuted(!upeHasLiveTrack('video'));
+    console.log('Video', wasOn ? 'off (camera released)' : 'on');
 }
 
 // Ensure sidebar and peer are ready when room is set
@@ -1253,3 +1322,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (changes.peerId) peerId = changes.peerId.newValue;
     // Overlay will appear when playback starts via setupVideoListeners()
 });
+
+// Leave the party cleanly when the tab closes or navigates away, so we don't
+// linger in the room as a ghost participant.
+window.addEventListener('pagehide', () => { try { leaveParty(); } catch {} });

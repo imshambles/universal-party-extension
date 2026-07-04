@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Party Extension",
+  "name": "Universal Party",
   "version": "1.0",
+  "description": "Watch anything together, in sync — synced play/pause/seek, group video chat, and text chat on Netflix, Prime Video, Disney+, Hulu, Hotstar, and YouTube.",
   "permissions": [
     "activeTab",
     "tabs",
@@ -17,7 +18,8 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_title": "Universal Party"
   },
   "content_scripts": [
     {
