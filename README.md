@@ -1,75 +1,98 @@
-# Universal Party Extension (UPE)
+# Universal Party
 
-A Chrome Extension that enables synchronized playback (play/pause/seek) and peer-to-peer video chat for watch parties across popular streaming sites.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Manifest V3](https://img.shields.io/badge/Chrome-Manifest%20V3-blue.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
 
-## Features
-- Sync video playback across participants (play/pause/seek)
-- Room-based sessions via a lightweight Socket.IO signaling server
-- Peer-to-peer video chat using PeerJS (public PeerJS server by default)
-- Chrome Extension (Manifest V3) with simple popup UI
+Watch anything together, in sync. Universal Party is a Chrome extension that keeps **play / pause / seek in sync** across everyone in a room, with **group video chat** and **text chat**, on Netflix, Prime Video, Disney+, Hulu, Hotstar, and YouTube.
 
-## Repository Structure
-- UPE-backend: Node.js Express + Socket.IO signaling server
-- UPE-frontend: Chrome Extension (MV3) files
+- 🎬 **Synced playback** — play, pause and seek propagate to everyone, aligned to the same timestamp (no drift)
+- 🎥 **Group video chat** — peer-to-peer webcam/mic via WebRTC (PeerJS)
+- 💬 **Text chat** — in an on-page sidebar overlay
+- 🔗 **Invite links** — drop friends into the same video at your exact timestamp
+- 🎨 **Neo-brutalist UI** — bold, high-contrast popup and sidebar
 
-## Prerequisites
-- Node.js 18+
-- Google Chrome (or Chromium-based browser supporting MV3)
+## How it works
 
-## Setup
-### 1) Install backend dependencies
 ```
+┌────────────────────┐   Socket.IO (sync + signaling)   ┌────────────────────┐
+│  Browser A          │ <──────────────────────────────> │  Browser B          │
+│  content script     │                                  │  content script     │
+│  • hooks <video>    │        ┌──────────────────┐       │  • hooks <video>    │
+│  • sidebar overlay  │ <────> │  Signaling server │ <───> │  • sidebar overlay  │
+│  • PeerJS (WebRTC)  │        │  (Express + IO)   │       │  • PeerJS (WebRTC)  │
+└────────────────────┘        └──────────────────┘        └────────────────────┘
+         └──────────────  WebRTC media (peer-to-peer)  ──────────────┘
+```
+
+- **`UPE-frontend/`** — the Chrome extension (Manifest V3). A content script hooks the page's `<video>` element, relays play/pause/seek over Socket.IO, and renders the sidebar (video tiles + chat).
+- **`UPE-backend/`** — a small Express + Socket.IO server that relays sync events and acts as the WebRTC signaling channel. It keeps no state and stores no media.
+
+## Install (users)
+
+The extension isn't on the Chrome Web Store yet, so it loads unpacked:
+
+1. Download the latest packaged zip (or build it — see below) and unzip it.
+2. Open `chrome://extensions` (or `brave://extensions`, `edge://extensions`).
+3. Enable **Developer mode**.
+4. Click **Load unpacked** and select the `UPE-frontend` folder.
+
+Full end-user steps (start a party, invite, join) are in [`INSTALL.md`](./INSTALL.md).
+
+## Development
+
+### Backend (signaling server)
+
+```bash
 cd UPE-backend
 npm install
+npm run dev   # nodemon, or: npm start
+# → "Signaling server running on port 3000"
 ```
 
-### 2) Run the signaling server (port 3000)
+### Frontend (extension)
+
+Load `UPE-frontend/` as an unpacked extension (steps above). By default the
+extension talks to the hosted signaling server. To point it at your local
+server during development, edit the `io(...)` URL in
+[`UPE-frontend/contentScript.js`](./UPE-frontend/contentScript.js) (in
+`ensureSocket()`) to `http://localhost:3000`, and add `http://localhost:3000`
+to `connect-src` in [`manifest.json`](./UPE-frontend/manifest.json).
+
+### Package a shareable build
+
+```bash
+./scripts/package-extension.sh
+# → dist/universal-party-extension-v<version>.zip
 ```
-# Dev mode with auto-restart
-npm run dev
 
-# Or plain start
-npm start
-```
-You should see: "Signaling server running on port 3000".
+The script bundles only the runnable extension files (no dev/test cruft) plus `INSTALL.md`.
 
-### 3) Load the Chrome Extension
-1. Open chrome://extensions
-2. Enable "Developer mode"
-3. Click "Load unpacked" and select the `UPE-frontend` directory
+## Deploying the backend
 
-## Usage
-1. Open a supported streaming site (Netflix, Hulu, Disney+, Prime Video)
-2. Create or join a room:
-   - Open the extension popup, click "Create Room" or "Join Room" and follow prompts
-   - Alternatively, the content script will prompt for a Room ID if none is set
-3. To start video chat, click "Start Video Chat" in the popup or the "Open Video Chat" button injected on the page; a window opens with local/remote video
-4. Share the Room ID with others; as they join, playback will sync and video chat can connect peer-to-peer
+Any Node host works. On [Render](https://render.com):
 
-## Notes and Limitations
-- The extension connects to the local signaling server at http://localhost:3000
-- PeerJS uses a public server (0.peerjs.com) by default; for production, set up your own PeerJS + TURN servers
-- CORS is permissive in development; tighten for production
+- **Root Directory:** `UPE-backend`
+- **Build Command:** `npm install`
+- **Start Command:** `npm start`
+- **Branch:** `main`
 
-## Development Tips
-- Content script and extension pages load Socket.IO from `UPE-frontend/libs/socket.io.min.js` (global `io`)
-- PeerJS is loaded via `UPE-frontend/libs/peerjs.min.js` (global `Peer`)
-- If you prefer ES module imports, add a bundler (e.g., Vite) and adjust the manifest accordingly
+Then set the extension's signaling URL (in `contentScript.js`) to your service
+URL, and add it to `connect-src` in `manifest.json`. The server reads `PORT`
+from the environment where available.
 
-## Testing Checklist
-- Backend:
-  - Start server: `npm run dev` in UPE-backend
-  - Observe connections and room join logs on client actions
-- Extension:
-  - Load unpacked and open a supported site
-  - Create a room in popup, verify the room ID appears
-  - In a second browser profile/window, join the same room
-  - Verify play/pause/seek syncs between sessions
-  - Open video chat windows on both and verify local preview and remote stream appear
+## Tech stack
 
-## Security Considerations
-- Anyone who knows a Room ID can join; add auth/room secrets for production use
-- Consider hosting your own PeerJS server with TURN/STUN for reliability
+- **Extension:** vanilla JS, Chrome Manifest V3, [Socket.IO client], [PeerJS]
+- **Backend:** Node.js, Express, [Socket.IO]
+
+[Socket.IO]: https://socket.io/
+[Socket.IO client]: https://socket.io/docs/v4/client-api/
+[PeerJS]: https://peerjs.com/
+
+## Contributing
+
+Contributions are welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## License
-MIT
+
+[MIT](./LICENSE) © Vishwas Latiyan
