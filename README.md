@@ -4,6 +4,8 @@
 [![Manifest V3](https://img.shields.io/badge/Chrome-Manifest%20V3-blue.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
 
 Watch anything together, in sync. Universal Party is a Chrome extension that keeps **play / pause / seek in sync** across everyone in a room, with **group video chat** and **text chat**, on Netflix, Prime Video, Disney+, Hulu, Hotstar, and YouTube.
+![Uploading image.png…]()
+
 
 - 🎬 **Synced playback** — play, pause and seek propagate to everyone, aligned to the same timestamp (no drift)
 - 🎥 **Group video chat** — peer-to-peer webcam/mic via WebRTC (PeerJS)
